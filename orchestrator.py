@@ -21,10 +21,6 @@ client = Anthropic(api_key=API_KEY)
 
 ROOT = Path(__file__).parent.resolve()
 PROMPTS = ROOT / "prompts"
-OUTPUTS = ROOT / "outputs"
-CHUNKS_DIR = OUTPUTS / "chunks"
-REVIEWS_DIR = OUTPUTS / "reviews"
-ISSUES_FILE = OUTPUTS / "issues.jsonl"
 
 
 @dataclass
@@ -105,13 +101,13 @@ def extract_global_context(tex: str) -> str:
     return "\n\n".join(parts)
 
 
-def load_known_issues() -> List[dict]:
-    if not ISSUES_FILE.exists():
+def load_known_issues(issues_file: Path) -> List[dict]:
+    if not issues_file.exists():
         return []
 
     issues = []
 
-    with open(ISSUES_FILE, "rb") as f:
+    with open(issues_file, "rb") as f:
         for line in f:
             issues.append(json.loads(line))
 
@@ -173,9 +169,9 @@ Return ONLY valid JSON. """
     return json.loads(text)
 
 
-def append_issues(review_json: dict):
+def append_issues(review_json: dict, issues_file: Path):
     issues = review_json.get("issues", [])
-    with open(ISSUES_FILE, "ab") as f:
+    with open(issues_file, "ab") as f:
         for issue in issues:
             f.write(json.dumps(issue).encode("utf-8"))
             f.write(b"\n")
@@ -238,10 +234,16 @@ Produce a final referee report in markdown."""
     return response.content[0].text
 
 
-def run_pipeline(tex_path: str):
-    OUTPUTS.mkdir(exist_ok=True)
-    CHUNKS_DIR.mkdir(exist_ok=True)
-    REVIEWS_DIR.mkdir(exist_ok=True)
+def run_pipeline(tex_path: str, output_dir: Path | str | None = None):
+    if output_dir is None:
+        output_dir = Path(tex_path).parent / "review"
+    else:
+        output_dir = Path(output_dir)
+    reviews_dir = output_dir / "reviews"
+    issues_file = output_dir / "issues.jsonl"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reviews_dir.mkdir(exist_ok=True)
     tex = load_tex(tex_path)
 
     chunks = chunk_by_section(tex)
@@ -252,7 +254,7 @@ def run_pipeline(tex_path: str):
     for chunk in chunks:
         print(f"[bold blue]Reviewing:[/bold blue] {chunk.name}")
 
-        known_issues = summarize_known_issues(load_known_issues())
+        known_issues = summarize_known_issues(load_known_issues(issues_file))
 
         for reviewer_name in REVIEWERS:
             print(f"  -> {reviewer_name}")
@@ -264,10 +266,10 @@ def run_pipeline(tex_path: str):
                 known_issues,
             )
 
-            append_issues(review)
+            append_issues(review, issues_file)
             all_reviews.append(review)
 
-            out_path = REVIEWS_DIR / f"{chunk.name}_{reviewer_name}.json"
+            out_path = reviews_dir / f"{chunk.name}_{reviewer_name}.json"
 
             out_path.write_text(
                 json.dumps(review, indent=2),
@@ -281,7 +283,7 @@ def run_pipeline(tex_path: str):
 
     deduped = deduplicate_issues(all_issues)
 
-    summary_path = OUTPUTS / "deduped_issues.json"
+    summary_path = output_dir / "deduped_issues.json"
 
     summary_path.write_text(
         json.dumps(deduped, indent=2),
@@ -295,7 +297,7 @@ def run_pipeline(tex_path: str):
         global_context,
     )
 
-    final_report_path = OUTPUTS / "final_report.md"
+    final_report_path = output_dir / "final_report.md"
 
     final_report_path.write_text(
         final_report,
@@ -309,6 +311,11 @@ def run_pipeline(tex_path: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("input")
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Output directory (default: <input_dir>/review/)",
+    )
     args = parser.parse_args()
 
-    run_pipeline(args.input)
+    run_pipeline(args.input, args.output)
