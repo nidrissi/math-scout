@@ -51,6 +51,18 @@ REVIEWERS = {
 SECTION_RE = re.compile(r"\\section\*?\{(.+?)\}")
 
 
+def extract_text(response) -> str:
+    texts = []
+    for block in response.content:
+        if block.type == "text":
+            texts.append(block.text)
+        else:
+            print(f"[yellow]Unexpected content block type {block.type!r}: {block}[/yellow]")
+    if not texts:
+        raise ValueError(f"No text block in response (stop_reason={response.stop_reason!r})")
+    return "".join(texts)
+
+
 def load_tex(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
@@ -164,7 +176,7 @@ Return ONLY valid JSON. """
         ],
     )
 
-    text = response.content[0].text
+    text = extract_text(response)
 
     return json.loads(text)
 
@@ -231,7 +243,7 @@ Produce a final referee report in markdown."""
         ],
     )
 
-    return response.content[0].text
+    return extract_text(response)
 
 
 def run_pipeline(tex_path: str, output_dir: Path | str | None = None):
