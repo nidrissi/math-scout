@@ -224,9 +224,40 @@ def deduplicate_issues(issues: List[dict]) -> List[dict]:
     return deduped
 
 
-###############################################################################
-# Review pipeline
-###############################################################################
+def run_final_referee(
+    tex: str,
+    deduped_issues: List[dict],
+    global_context: str,
+):
+    system_prompt = (PROMPTS / "final_referee.txt").read_text(encoding="utf-8")
+    issues_json = json.dumps(
+        deduped_issues,
+        indent=2,
+    )
+
+    user_prompt = f"""
+# GLOBAL CONTEXT
+{global_context}
+# DETECTED ISSUES
+{issues_json}
+# FULL PAPER
+```latex
+{tex}
+```
+Produce a final referee report in markdown."""
+    response = client.messages.create(
+        model=MODEL_STRONG,
+        max_tokens=8192,
+        system=system_prompt,
+        messages=[
+            {
+                "role": "user",
+                "content": user_prompt,
+            }
+        ],
+    )
+
+    return response.content[0].text
 
 
 def run_pipeline(tex_path: str):
@@ -276,6 +307,20 @@ def run_pipeline(tex_path: str):
 
     summary_path.write_text(
         json.dumps(deduped, indent=2),
+        encoding="utf-8",
+    )
+
+    print("[bold blue]Running final referee synthesis...[/bold blue]")
+    final_report = run_final_referee(
+        tex,
+        deduped,
+        global_context,
+    )
+
+    final_report_path = OUTPUTS / "final_report.md"
+
+    final_report_path.write_text(
+        final_report,
         encoding="utf-8",
     )
 
