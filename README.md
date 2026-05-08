@@ -26,11 +26,14 @@ pip install anthropic rapidfuzz rich
 ```bash
 export ANTHROPIC_API_KEY=your_key
 python orchestrator.py path/to/paper.tex
+python orchestrator.py path/to/paper.tex --output path/to/output_dir
 ```
+
+The `--output` argument is optional. When omitted, output is written to a `review/` directory next to the input file.
 
 ## Output
 
-All output is written to `outputs/`:
+All output is written to the output directory (default: `<input_dir>/review/`):
 
 | File | Contents |
 |---|---|
