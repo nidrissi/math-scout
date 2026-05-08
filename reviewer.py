@@ -30,8 +30,8 @@ PROMPTS = ROOT / "prompts"
 class Chunk:
     """A named slice of a LaTeX document corresponding to one \\section{}."""
 
-    name: str    # section title extracted from \section{...}
-    content: str # raw LaTeX from this section's heading to the next one
+    name: str  # section title extracted from \section{...}
+    content: str  # raw LaTeX from this section's heading to the next one
 
 
 # Maps reviewer name → {prompt: filename under prompts/, model: model ID}.
@@ -65,9 +65,13 @@ def extract_text(response) -> str:
         if block.type == "text":
             texts.append(block.text)
         else:
-            print(f"[yellow]Unexpected content block type {block.type!r}: {block}[/yellow]")
+            print(
+                f"[yellow]Unexpected content block type {block.type!r}: {block}[/yellow]"
+            )
     if not texts:
-        raise ValueError(f"No text block in response (stop_reason={response.stop_reason!r})")
+        raise ValueError(
+            f"No text block in response (stop_reason={response.stop_reason!r})"
+        )
     return "".join(texts)
 
 
@@ -83,13 +87,17 @@ def _call_with_retry(fn, retries: int = 3, base_delay: float = 5.0):
         ) as exc:
             if attempt == retries:
                 raise
-            delay = base_delay * (2 ** attempt)
-            print(f"[yellow]Transient error ({exc.__class__.__name__}), retrying in {delay:.0f}s…[/yellow]")
+            delay = base_delay * (2**attempt)
+            print(
+                f"[yellow]Transient error ({exc.__class__.__name__}), retrying in {delay:.0f}s…[/yellow]"
+            )
             time.sleep(delay)
         except _anthropic.APIStatusError as exc:
             if exc.status_code >= 500 and attempt < retries:
-                delay = base_delay * (2 ** attempt)
-                print(f"[yellow]Server error {exc.status_code}, retrying in {delay:.0f}s…[/yellow]")
+                delay = base_delay * (2**attempt)
+                print(
+                    f"[yellow]Server error {exc.status_code}, retrying in {delay:.0f}s…[/yellow]"
+                )
                 time.sleep(delay)
             else:
                 raise
@@ -203,11 +211,18 @@ SECTION TITLE: {chunk.name}
 {chunk.content}
 ```
 Return ONLY valid JSON. """
+
     def _api_call():
         return client.messages.create(
             model=config["model"],
             max_tokens=16384,
-            system=system_prompt,
+            system=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[
                 {
                     "role": "user",
@@ -224,7 +239,9 @@ Return ONLY valid JSON. """
         except json.JSONDecodeError:
             if json_attempt == 2:
                 raise
-            print(f"[yellow]JSON parse failed (attempt {json_attempt + 1}/3), retrying…[/yellow]")
+            print(
+                f"[yellow]JSON parse failed (attempt {json_attempt + 1}/3), retrying…[/yellow]"
+            )
 
 
 def append_issues(review_json: dict, issues_file: Path) -> None:
@@ -284,7 +301,13 @@ Produce a final referee report in markdown."""
         lambda: client.messages.create(
             model=MODEL_STRONG,
             max_tokens=16384,
-            system=system_prompt,
+            system=[
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             messages=[
                 {
                     "role": "user",
@@ -338,7 +361,9 @@ def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
                     known_issues,
                 )
             except Exception as exc:
-                print(f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]")
+                print(
+                    f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]"
+                )
                 continue
 
             append_issues(review, issues_file)
