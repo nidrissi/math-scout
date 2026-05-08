@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
-import orjson
 from anthropic import Anthropic
 from rapidfuzz import fuzz
 from rich import print
@@ -114,7 +113,7 @@ def load_known_issues() -> List[dict]:
 
     with open(ISSUES_FILE, "rb") as f:
         for line in f:
-            issues.append(orjson.loads(line))
+            issues.append(json.loads(line))
 
     return issues
 
@@ -178,7 +177,7 @@ def append_issues(review_json: dict):
     issues = review_json.get("issues", [])
     with open(ISSUES_FILE, "ab") as f:
         for issue in issues:
-            f.write(orjson.dumps(issue))
+            f.write(json.dumps(issue).encode("utf-8"))
             f.write(b"\n")
 
 
