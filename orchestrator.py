@@ -53,10 +53,6 @@ REVIEWERS = {
     },
 }
 
-###############################################################################
-# LaTeX chunking
-###############################################################################
-
 SECTION_RE = re.compile(r"\\section\*?\{(.+?)\}")
 
 
@@ -80,10 +76,6 @@ def chunk_by_section(tex: str) -> List[Chunk]:
 
     return chunks
 
-
-###############################################################################
-# Global context extraction
-###############################################################################
 
 ABSTRACT_RE = re.compile(
     r"\\begin\{abstract\}(.*?)\\end\{abstract\}",
@@ -112,11 +104,6 @@ def extract_global_context(tex: str) -> str:
         parts.extend(theorem_matches[:10])
 
     return "\n\n".join(parts)
-
-
-###############################################################################
-# Known issue memory
-###############################################################################
 
 
 def load_known_issues() -> List[dict]:
@@ -187,11 +174,6 @@ Return ONLY valid JSON. """
     return json.loads(text)
 
 
-###############################################################################
-# Issue persistence
-###############################################################################
-
-
 def append_issues(review_json: dict):
     issues = review_json.get("issues", [])
     with open(ISSUES_FILE, "ab") as f:
@@ -200,9 +182,6 @@ def append_issues(review_json: dict):
             f.write(b"\n")
 
 
-###############################################################################
-# Deduplication
-###############################################################################
 def deduplicate_issues(issues: List[dict]) -> List[dict]:
     deduped = []
     for issue in issues:
