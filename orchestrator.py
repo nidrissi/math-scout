@@ -208,7 +208,7 @@ def run_final_referee(
     deduped_issues: List[dict],
     global_context: str,
 ):
-    system_prompt = (PROMPTS / "final_referee.txt").read_text(encoding="utf-8")
+    system_prompt = (PROMPTS / "final_referee.md").read_text(encoding="utf-8")
     issues_json = json.dumps(
         deduped_issues,
         indent=2,
