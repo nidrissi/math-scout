@@ -25,10 +25,13 @@ PROMPTS = ROOT / "prompts"
 
 @dataclass
 class Chunk:
-    name: str
-    content: str
+    """A named slice of a LaTeX document corresponding to one \\section{}."""
+
+    name: str    # section title extracted from \section{...}
+    content: str # raw LaTeX from this section's heading to the next one
 
 
+# Maps reviewer name → {prompt: filename under prompts/, model: model ID}.
 REVIEWERS = {
     "FormalVerifier": {
         "prompt": "formal_verifier.md",
@@ -48,10 +51,12 @@ REVIEWERS = {
     },
 }
 
+# Matches \section{...} and \section*{...} headings.
 SECTION_RE = re.compile(r"\\section\*?\{(.+?)\}")
 
 
 def extract_text(response) -> str:
+    """Concatenate all text blocks from a Claude response, warning on unexpected block types."""
     texts = []
     for block in response.content:
         if block.type == "text":
@@ -64,10 +69,12 @@ def extract_text(response) -> str:
 
 
 def load_tex(path: str) -> str:
+    """Read a .tex file and return its full contents as a UTF-8 string."""
     return Path(path).read_text(encoding="utf-8")
 
 
 def chunk_by_section(tex: str) -> List[Chunk]:
+    """Split a LaTeX string into Chunks at each \\section boundary."""
     matches = list(SECTION_RE.finditer(tex))
 
     chunks = []
@@ -84,12 +91,13 @@ def chunk_by_section(tex: str) -> List[Chunk]:
     return chunks
 
 
+# Matches \begin{abstract}...\end{abstract} across newlines.
 ABSTRACT_RE = re.compile(
     r"\\begin\{abstract\}(.*?)\\end\{abstract\}",
     re.DOTALL,
 )
 
-
+# Matches \begin{theorem}...\end{theorem} across newlines.
 THEOREM_RE = re.compile(
     r"\\begin\{theorem\}(.*?)\\end\{theorem\}",
     re.DOTALL,
@@ -97,6 +105,7 @@ THEOREM_RE = re.compile(
 
 
 def extract_global_context(tex: str) -> str:
+    """Extract the abstract and up to 10 theorems to serve as shared context in every reviewer prompt."""
     parts = []
 
     abstract_match = ABSTRACT_RE.search(tex)
@@ -114,6 +123,7 @@ def extract_global_context(tex: str) -> str:
 
 
 def load_known_issues(issues_file: Path) -> List[dict]:
+    """Load all issues from a JSONL file; returns an empty list if the file does not exist."""
     if not issues_file.exists():
         return []
 
@@ -127,6 +137,7 @@ def load_known_issues(issues_file: Path) -> List[dict]:
 
 
 def summarize_known_issues(issues: List[dict], limit: int = 15) -> str:
+    """Format the first *limit* known issues as a bullet list for injection into reviewer prompts."""
     if not issues:
         return "No previously detected issues."
 
@@ -143,7 +154,8 @@ def call_reviewer(
     chunk: Chunk,
     global_context: str,
     known_issues: str,
-):
+) -> dict:
+    """Send a section chunk to a named reviewer and return its parsed JSON issue report."""
     config = REVIEWERS[reviewer_name]
 
     system_prompt = (PROMPTS / config["prompt"]).read_text(encoding="utf-8")
@@ -181,7 +193,8 @@ Return ONLY valid JSON. """
     return json.loads(text)
 
 
-def append_issues(review_json: dict, issues_file: Path):
+def append_issues(review_json: dict, issues_file: Path) -> None:
+    """Append each issue from a reviewer's JSON response as a separate line to the JSONL issues file."""
     issues = review_json.get("issues", [])
     with open(issues_file, "ab") as f:
         for issue in issues:
@@ -190,6 +203,7 @@ def append_issues(review_json: dict, issues_file: Path):
 
 
 def deduplicate_issues(issues: List[dict]) -> List[dict]:
+    """Remove near-duplicate issues using fuzzy ratio on the analysis field; drops anything above 88."""
     deduped = []
     for issue in issues:
         duplicate = False
@@ -214,7 +228,8 @@ def run_final_referee(
     tex: str,
     deduped_issues: List[dict],
     global_context: str,
-):
+) -> str:
+    """Synthesize a final markdown referee report from the full paper and the deduplicated issue list."""
     system_prompt = (PROMPTS / "final_referee.md").read_text(encoding="utf-8")
     issues_json = json.dumps(
         deduped_issues,
@@ -246,7 +261,8 @@ Produce a final referee report in markdown."""
     return extract_text(response)
 
 
-def run_pipeline(tex_path: str, output_dir: Path | str | None = None):
+def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
+    """Run the full multi-reviewer pipeline on a .tex file and write all outputs to *output_dir*."""
     if output_dir is None:
         output_dir = Path(tex_path).parent / "review"
     else:
