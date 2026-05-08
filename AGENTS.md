@@ -45,4 +45,4 @@ The final referee (`prompts/final_referee.md`) receives global context + deduped
 
 ## Dependencies
 
-`anthropic`, `orjson`, `rapidfuzz`, `rich` — all installed in `.venv/`.
+`anthropic`, `rapidfuzz`, `rich` — all installed in `.venv/`.
