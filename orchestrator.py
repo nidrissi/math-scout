@@ -172,7 +172,7 @@ SECTION TITLE: {chunk.name}
 Return ONLY valid JSON. """
     response = client.messages.create(
         model=config["model"],
-        max_tokens=8192,
+        max_tokens=16384,
         system=system_prompt,
         messages=[
             {
@@ -247,7 +247,7 @@ def run_final_referee(
 Produce a final referee report in markdown."""
     response = client.messages.create(
         model=MODEL_STRONG,
-        max_tokens=8192,
+        max_tokens=16384,
         system=system_prompt,
         messages=[
             {
