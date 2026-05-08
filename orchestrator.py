@@ -4,9 +4,12 @@ import argparse
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
+
+import anthropic as _anthropic
 
 from anthropic import Anthropic
 from rapidfuzz import fuzz
@@ -66,6 +69,30 @@ def extract_text(response) -> str:
     if not texts:
         raise ValueError(f"No text block in response (stop_reason={response.stop_reason!r})")
     return "".join(texts)
+
+
+def _call_with_retry(fn, retries: int = 3, base_delay: float = 5.0):
+    """Call *fn* with exponential-backoff retries on transient API and server errors."""
+    for attempt in range(retries + 1):
+        try:
+            return fn()
+        except (
+            _anthropic.RateLimitError,
+            _anthropic.APIConnectionError,
+            _anthropic.APITimeoutError,
+        ) as exc:
+            if attempt == retries:
+                raise
+            delay = base_delay * (2 ** attempt)
+            print(f"[yellow]Transient error ({exc.__class__.__name__}), retrying in {delay:.0f}s…[/yellow]")
+            time.sleep(delay)
+        except _anthropic.APIStatusError as exc:
+            if exc.status_code >= 500 and attempt < retries:
+                delay = base_delay * (2 ** attempt)
+                print(f"[yellow]Server error {exc.status_code}, retrying in {delay:.0f}s…[/yellow]")
+                time.sleep(delay)
+            else:
+                raise
 
 
 def load_tex(path: str) -> str:
@@ -176,21 +203,28 @@ SECTION TITLE: {chunk.name}
 {chunk.content}
 ```
 Return ONLY valid JSON. """
-    response = client.messages.create(
-        model=config["model"],
-        max_tokens=16384,
-        system=system_prompt,
-        messages=[
-            {
-                "role": "user",
-                "content": user_prompt,
-            }
-        ],
-    )
+    def _api_call():
+        return client.messages.create(
+            model=config["model"],
+            max_tokens=16384,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                }
+            ],
+        )
 
-    text = extract_text(response)
-
-    return json.loads(text)
+    for json_attempt in range(3):
+        response = _call_with_retry(_api_call)
+        text = extract_text(response)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            if json_attempt == 2:
+                raise
+            print(f"[yellow]JSON parse failed (attempt {json_attempt + 1}/3), retrying…[/yellow]")
 
 
 def append_issues(review_json: dict, issues_file: Path) -> None:
@@ -246,16 +280,18 @@ def run_final_referee(
 {tex}
 ```
 Produce a final referee report in markdown."""
-    response = client.messages.create(
-        model=MODEL_STRONG,
-        max_tokens=16384,
-        system=system_prompt,
-        messages=[
-            {
-                "role": "user",
-                "content": user_prompt,
-            }
-        ],
+    response = _call_with_retry(
+        lambda: client.messages.create(
+            model=MODEL_STRONG,
+            max_tokens=16384,
+            system=system_prompt,
+            messages=[
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                }
+            ],
+        )
     )
 
     return extract_text(response)
@@ -285,19 +321,28 @@ def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
         known_issues = summarize_known_issues(load_known_issues(issues_file))
 
         for reviewer_name in REVIEWERS:
+            out_path = reviews_dir / f"{chunk.name}_{reviewer_name}.json"
+
+            if out_path.exists():
+                print(f"  -> {reviewer_name} [yellow](resuming from disk)[/yellow]")
+                all_reviews.append(json.loads(out_path.read_text(encoding="utf-8")))
+                continue
+
             print(f"  -> {reviewer_name}")
 
-            review = call_reviewer(
-                reviewer_name,
-                chunk,
-                global_context,
-                known_issues,
-            )
+            try:
+                review = call_reviewer(
+                    reviewer_name,
+                    chunk,
+                    global_context,
+                    known_issues,
+                )
+            except Exception as exc:
+                print(f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]")
+                continue
 
             append_issues(review, issues_file)
             all_reviews.append(review)
-
-            out_path = reviews_dir / f"{chunk.name}_{reviewer_name}.json"
 
             out_path.write_text(
                 json.dumps(review, indent=2),
