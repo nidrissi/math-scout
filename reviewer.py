@@ -16,6 +16,12 @@ from rich import print
 MODEL_STRONG = "claude-opus-4-7"
 MODEL_FAST = "claude-sonnet-4-6"
 
+# Approximate pricing per million tokens. Verify current rates at console.anthropic.com.
+MODEL_PRICING = {
+    MODEL_STRONG: {"input": 5.0, "output": 25.0},
+    MODEL_FAST: {"input": 3.0, "output": 15.0},
+}
+
 ROOT = Path(__file__).parent.resolve()
 PROMPTS = ROOT / "prompts"
 
@@ -254,14 +260,8 @@ def _api_call(
                         "text": f"# GLOBAL CONTEXT\n{global_context}",
                         "cache_control": {"type": "ephemeral"},
                     },
-                    {
-                        "type": "text",
-                        "text": f"# DETECTED ISSUES\n{known_issues}",
-                    },
-                    {
-                        "type": "text",
-                        "text": to_review,
-                    },
+                    {"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"},
+                    {"type": "text", "text": to_review},
                 ],
             },
         ],
@@ -269,6 +269,36 @@ def _api_call(
         if json_schema
         else anthropic.omit,
     )
+
+
+def _format_section(chunk: Chunk) -> str:
+    """Format a chunk as the 'section under review' block passed to every reviewer prompt."""
+    return f"# SECTION UNDER REVIEW\n\nSECTION TITLE: {chunk.name}\n\n```latex\n{chunk.content}\n```"
+
+
+def _count_tokens(
+    client: anthropic.Anthropic,
+    model: str,
+    system_prompt: str,
+    global_context: str,
+    known_issues: str,
+    to_review: str,
+) -> int:
+    """Return the input-token count for one API call without generating a response."""
+    return client.messages.count_tokens(
+        model=model,
+        system=system_prompt,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"# GLOBAL CONTEXT\n{global_context}"},
+                    {"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"},
+                    {"type": "text", "text": to_review},
+                ],
+            }
+        ],
+    ).input_tokens
 
 
 def call_reviewer(
@@ -290,7 +320,7 @@ def call_reviewer(
             system_prompt=system_prompt,
             global_context=global_context,
             known_issues=known_issues,
-            to_review=f"# SECTION UNDER REVIEW\n\nSECTION TITLE: {chunk.name}\n\n```latex\n{chunk.content}\n```",
+            to_review=_format_section(chunk),
             json_schema=config["schema"],
         )
     )
@@ -356,6 +386,14 @@ def run_final_referee(
     return extract_text(response)
 
 
+def _prepare(tex_path: str) -> tuple[str, List[Chunk], str]:
+    """Load a .tex file, split it into section chunks, and extract global context."""
+    tex = load_tex(tex_path)
+    chunks = chunk_by_section(tex)
+    global_context = extract_global_context(tex)
+    return tex, chunks, global_context
+
+
 def run_pipeline(
     client: anthropic.Anthropic, tex_path: str, output_dir: Path | str | None = None
 ) -> None:
@@ -371,9 +409,8 @@ def run_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(exist_ok=True)
     chunks_dir.mkdir(exist_ok=True)
-    tex = load_tex(tex_path)
+    tex, chunks, global_context = _prepare(tex_path)
 
-    chunks = chunk_by_section(tex)
     for chunk in chunks:
         chunk_path = chunks_dir / f"{chunk.name}.tex"
         chunk_path.write_text(chunk.content, encoding="utf-8")
@@ -381,7 +418,6 @@ def run_pipeline(
             f"[green]Extracted chunk:[/green] {chunk.name} (written to {chunk_path}, {len(chunk.content)} chars)"
         )
 
-    global_context = extract_global_context(tex)
     print(
         f"[green]Extracted global context ({len(global_context)} chars):[/green]\n[gray]{global_context[:500]}{'…' if len(global_context) > 500 else ''}[/gray]"
     )
@@ -468,6 +504,70 @@ def run_pipeline(
     print(f"Unique issues detected: {len(deduped_issues)}")
 
 
+def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
+    """Count input tokens and estimate cost without sending any generation requests."""
+    print(
+        "[yellow]DRY RUN — token counting only, no generation requests will be sent.[/yellow]"
+    )
+    print(
+        "[yellow]Warning: rough lower-bound estimate. The 'known issues' context fed to each "
+        "reviewer (which grows as earlier reviewers produce output) is not counted here "
+        "because it depends on actual generation.[/yellow]\n"
+    )
+
+    tex, chunks, global_context = _prepare(tex_path)
+    empty_known_issues = summarize_known_issues([])
+
+    token_totals: dict[str, int] = {MODEL_STRONG: 0, MODEL_FAST: 0}
+
+    for chunk in chunks:
+        for reviewer_name, config in REVIEWERS.items():
+            model = config["model"]
+            system_prompt = (PROMPTS / config["prompt"]).read_text(encoding="utf-8")
+            to_review = _format_section(chunk)
+            n = _count_tokens(
+                client,
+                model,
+                system_prompt,
+                global_context,
+                empty_known_issues,
+                to_review,
+            )
+            token_totals[model] += n
+            print(
+                f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer_name}[/cyan]: {n:,} input tokens"
+            )
+
+    # Final referee
+    system_prompt = (PROMPTS / "final_referee.md").read_text(encoding="utf-8")
+    n = _count_tokens(
+        client,
+        MODEL_STRONG,
+        system_prompt,
+        global_context,
+        "[]",  # no deduped issues available in dry run
+        f"# FULL PAPER\n```latex\n{tex}\n```",
+    )
+    token_totals[MODEL_STRONG] += n
+    print(f"  [blue]Final referee[/blue]: {n:,} input tokens")
+
+    total_input = sum(token_totals.values())
+    input_cost = sum(
+        count / 1e6 * MODEL_PRICING[model]["input"]
+        for model, count in token_totals.items()
+    )
+
+    print("\n[bold]Input tokens by model:[/bold]")
+    for model, count in token_totals.items():
+        rate = MODEL_PRICING[model]["input"]
+        print(f"  {model}: {count:,} tokens @ ${rate}/M = ${count / 1e6 * rate:.4f}")
+    print(f"  Total: {total_input:,} tokens")
+    print(f"[bold green]Estimated input cost: ${input_cost:.4f}[/bold green]")
+    print(
+        "[yellow]Output token costs are not included (unknown until generation).[/yellow]"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("input")
@@ -476,9 +576,17 @@ if __name__ == "__main__":
         default=None,
         help="Output directory (default: <input_dir>/review/)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Count tokens and estimate input cost without sending generation requests.",
+    )
     args = parser.parse_args()
 
     API_KEY = os.environ["ANTHROPIC_API_KEY"]
     client = anthropic.Anthropic(api_key=API_KEY)
 
-    run_pipeline(client, args.input, args.output)
+    if args.dry_run:
+        run_dry_run(client, args.input)
+    else:
+        run_pipeline(client, args.input, args.output)
