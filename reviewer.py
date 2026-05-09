@@ -494,7 +494,7 @@ def run_pipeline(
         f"[green]Extracted global context ({len(global_context)} chars):[/green]\n[gray]{global_context[:500]}{'…' if len(global_context) > 500 else ''}[/gray]"
     )
 
-    print("Continue? [y/N]")
+    print("Continue? (y/N)")
     if input().strip().lower() not in ("y", "yes"):
         print("[red]Aborting review.[/red]")
         return
