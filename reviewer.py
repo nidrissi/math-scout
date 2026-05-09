@@ -269,16 +269,15 @@ def _api_call(
     return client.messages.create(
         model=model,
         max_tokens=MAX_TOKENS,
+        cache_control={"type": "ephemeral"},
         system=[
             {
                 "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
+                "text": f"# GLOBAL CONTEXT\n{global_context}",
             },
             {
                 "type": "text",
-                "text": f"# GLOBAL CONTEXT\n{global_context}",
-                "cache_control": {"type": "ephemeral"},
+                "text": "# REVIEWER PROMPT\n" + system_prompt,
             },
         ],
         messages=[
@@ -313,23 +312,21 @@ def _count_tokens(
     """Return the input-token count for one API call without generating a response."""
     return client.messages.count_tokens(
         model=model,
+        cache_control={"type": "ephemeral"},
         system=[
             {
                 "type": "text",
-                "text": system_prompt,
-                "cache_control": {"type": "ephemeral"},
+                "text": f"# GLOBAL CONTEXT\n{global_context}",
             },
             {
                 "type": "text",
-                "text": f"# GLOBAL CONTEXT\n{global_context}",
-                "cache_control": {"type": "ephemeral"},
+                "text": "# REVIEWER PROMPT\n" + system_prompt,
             },
         ],
         messages=[
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": f"# GLOBAL CONTEXT\n{global_context}"},
                     {"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"},
                     {"type": "text", "text": to_review},
                 ],
