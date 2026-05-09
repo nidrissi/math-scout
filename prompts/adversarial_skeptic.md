@@ -41,4 +41,4 @@ Do NOT flag exposition or notation issues unless they hide a real mathematical r
 
 # Output format
 
-Populate the structured output schema. `section` must copy the section title from the user prompt verbatim. Use an empty `issues` array if the section survives stress-testing.
+Populate the structured output schema. Use an empty `issues` array if the section survives stress-testing.
