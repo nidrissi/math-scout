@@ -15,7 +15,7 @@ from rich import print
 
 MODEL_STRONG = "claude-opus-4-7"
 MODEL_FAST = "claude-sonnet-4-6"
-MAX_TOKENS = 16384
+MAX_TOKENS = 8192
 MODEL_PRICING = {
     MODEL_STRONG: {"input": 5.0, "output": 25.0},
     MODEL_FAST: {"input": 3.0, "output": 15.0},
