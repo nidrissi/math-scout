@@ -7,10 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
-
 import anthropic
-from rapidfuzz import fuzz
 from rich import print
 
 MODEL_STRONG = "claude-opus-4-7"
@@ -33,10 +30,6 @@ class Chunk:
     content: str  # raw LaTeX from this section's heading to the next one
 
 
-_SEVERITY = {"type": "string", "enum": ["critical", "major", "moderate", "minor"]}
-_CONFIDENCE = {"type": "number", "minimum": 0.0, "maximum": 1.0}
-
-
 def _reviewer_schema(reviewer_name: str) -> dict:
     """Return the top-level JSON Schema for a reviewer response."""
     return {
@@ -50,13 +43,16 @@ def _reviewer_schema(reviewer_name: str) -> dict:
                     "type": "object",
                     "properties": {
                         "title": {"type": "string"},
-                        "severity": _SEVERITY,
+                        "severity": {
+                            "type": "string",
+                            "enum": ["critical", "major", "moderate", "minor"],
+                        },
                         "type": {"type": "string"},
                         "location": {"type": "string"},
                         "quote": {"type": "string"},
                         "analysis": {"type": "string"},
                         "suggested_fix": {"type": "string"},
-                        "confidence": _CONFIDENCE,
+                        "confidence": {"type": "number"},
                     },
                     "required": [
                         "title",
@@ -156,7 +152,7 @@ def load_tex(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def chunk_by_section(tex: str) -> List[Chunk]:
+def chunk_by_section(tex: str) -> list[Chunk]:
     """Split a LaTeX string into Chunks at each \\section boundary."""
     matches = list(SECTION_RE.finditer(tex))
 
@@ -219,7 +215,7 @@ def extract_global_context(tex: str) -> str:
     return "\n\n".join(parts)
 
 
-def load_known_issues(issues_file: Path) -> List[dict]:
+def load_known_issues(issues_file: Path) -> list[dict]:
     """Load all issues from a JSONL file; returns an empty list if the file does not exist."""
     if not issues_file.exists():
         return []
@@ -233,7 +229,22 @@ def load_known_issues(issues_file: Path) -> List[dict]:
     return issues
 
 
-def summarize_known_issues(issues: List[dict], limit: int = 15) -> str:
+def format_all_issues(issues: list[dict]) -> str:
+    if not issues:
+        return "No previously detected issues."
+
+    lines = []
+    for iss in issues:
+        lines.append(
+            f"- **[{iss['reviewer']} - {iss['severity'].upper()}] {iss['title']}**\n"
+            f"  *Location:* {iss['location']}\n"
+            f"  *Analysis:* {iss['analysis']}\n"
+            f"  *Fix:* {iss['suggested_fix']}\n"
+        )
+    return "\n".join(lines)
+
+
+def summarize_known_issues(issues: list[dict], limit: int = 15) -> str:
     """Format the first *limit* known issues as a bullet list for injection into reviewer prompts."""
     if not issues:
         return "No previously detected issues."
@@ -263,17 +274,17 @@ def _api_call(
                 "type": "text",
                 "text": system_prompt,
                 "cache_control": {"type": "ephemeral"},
-            }
+            },
+            {
+                "type": "text",
+                "text": f"# GLOBAL CONTEXT\n{global_context}",
+                "cache_control": {"type": "ephemeral"},
+            },
         ],
         messages=[
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "text",
-                        "text": f"# GLOBAL CONTEXT\n{global_context}",
-                        "cache_control": {"type": "ephemeral"},
-                    },
                     {"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"},
                     {"type": "text", "text": to_review},
                 ],
@@ -297,11 +308,23 @@ def _count_tokens(
     global_context: str,
     known_issues: str,
     to_review: str,
+    json_schema: dict[str, object] | None = None,
 ) -> int:
     """Return the input-token count for one API call without generating a response."""
     return client.messages.count_tokens(
         model=model,
-        system=system_prompt,
+        system=[
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": f"# GLOBAL CONTEXT\n{global_context}",
+                "cache_control": {"type": "ephemeral"},
+            },
+        ],
         messages=[
             {
                 "role": "user",
@@ -312,6 +335,9 @@ def _count_tokens(
                 ],
             }
         ],
+        output_config={"format": {"type": "json_schema", "schema": json_schema}}
+        if json_schema
+        else anthropic.omit,
     ).input_tokens
 
 
@@ -351,40 +377,14 @@ def append_issues(review_json: dict, issues_file: Path) -> None:
             f.write(b"\n")
 
 
-def deduplicate_issues(issues: List[dict]) -> List[dict]:
-    """Remove near-duplicate issues using fuzzy ratio on the analysis field; drops anything above 88."""
-    deduped = []
-    for issue in issues:
-        duplicate = False
-
-        for existing in deduped:
-            score = fuzz.ratio(
-                issue["analysis"],
-                existing["analysis"],
-            )
-
-            if score > 88:
-                duplicate = True
-                break
-
-        if not duplicate:
-            deduped.append(issue)
-
-    return deduped
-
-
 def run_final_referee(
     client: anthropic.Anthropic,
     tex: str,
-    deduped_issues: List[dict],
+    issues: list[dict],
     global_context: str,
 ) -> str:
     """Synthesize a final markdown referee report from the full paper and the deduplicated issue list."""
     system_prompt = (PROMPTS / "final_referee.md").read_text(encoding="utf-8")
-    issues_json = json.dumps(
-        deduped_issues,
-        indent=2,
-    )
 
     response = _call_with_retry(
         lambda: _api_call(
@@ -392,7 +392,7 @@ def run_final_referee(
             model=MODEL_STRONG,
             system_prompt=system_prompt,
             global_context=global_context,
-            known_issues=issues_json,
+            known_issues=format_all_issues(issues),
             to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
         )
     )
@@ -400,7 +400,7 @@ def run_final_referee(
     return extract_text(response)
 
 
-def _prepare(tex_path: str) -> tuple[str, List[Chunk], str]:
+def _prepare(tex_path: str) -> tuple[str, list[Chunk], str]:
     """Load a .tex file, split it into section chunks, and extract global context."""
     tex = load_tex(tex_path)
     chunks = chunk_by_section(tex)
@@ -485,17 +485,15 @@ def run_pipeline(
                 encoding="utf-8",
             )
 
-    all_issues = []
+    all_issues: list[dict] = []
 
     for review in all_reviews:
         all_issues.extend(review.get("issues", []))
 
-    deduped_issues = deduplicate_issues(all_issues)
-
     summary_path = output_dir / "deduped_issues.json"
 
     summary_path.write_text(
-        json.dumps(deduped_issues, indent=2),
+        json.dumps(all_issues, indent=2),
         encoding="utf-8",
     )
 
@@ -503,7 +501,7 @@ def run_pipeline(
     final_report = run_final_referee(
         client=client,
         tex=tex,
-        deduped_issues=deduped_issues,
+        issues=all_issues,
         global_context=global_context,
     )
 
@@ -515,7 +513,7 @@ def run_pipeline(
     )
 
     print("\n[bold green]Review complete.[/bold green]")
-    print(f"Unique issues detected: {len(deduped_issues)}")
+    print(f"Issues detected: {len(all_issues)}")
 
 
 def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
@@ -539,6 +537,7 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
         for reviewer_name, config in REVIEWERS.items():
             model = config["model"]
             system_prompt = (PROMPTS / config["prompt"]).read_text(encoding="utf-8")
+            schema = config["schema"]
             to_review = _format_section(chunk)
             n = _count_tokens(
                 client,
@@ -547,6 +546,7 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
                 global_context,
                 empty_known_issues,
                 to_review,
+                json_schema=schema,
             )
             token_totals[model] += n
             call_counts[model] += 1
