@@ -568,14 +568,14 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
     print("\n[bold]Input tokens by model:[/bold]")
     for model, count in token_totals.items():
         rate = MODEL_PRICING[model]["input"]
-        print(f"  {model}: {count:,} tokens @ ${rate}/M = ${count / 1e6 * rate:.4f}")
+        print(f"  {model}: {count:,} tokens @ ${rate}/M = ${count / 1e6 * rate:.2f}")
     print(f"  Total: {total_input:,} tokens")
-    print(f"[bold green]Estimated input cost: ${input_cost:.4f}[/bold green]")
+    print(f"[bold green]Estimated input cost: ${input_cost:.2f}[/bold green]")
     print(
-        f"[bold green]Max output cost (if all {sum(call_counts.values())} calls use {MAX_TOKENS:,} tokens): ${max_output_cost:.4f}[/bold green] ({max_output_tokens:,} tokens)"
+        f"[bold green]Max output cost: ${max_output_cost:.2f}[/bold green]  (if all {sum(call_counts.values())} calls use {MAX_TOKENS:,} tokens => {max_output_tokens:,} output tokens total)"
     )
     print(
-        f"[bold green]Max total cost: ${input_cost + max_output_cost:.4f}[/bold green]"
+        f"[bold green]Max total cost: ${input_cost + max_output_cost:.2f}[/bold green]"
     )
 
 
