@@ -15,8 +15,7 @@ from rich import print
 
 MODEL_STRONG = "claude-opus-4-7"
 MODEL_FAST = "claude-sonnet-4-6"
-
-# Approximate pricing per million tokens. Verify current rates at console.anthropic.com.
+MAX_TOKENS = 16384
 MODEL_PRICING = {
     MODEL_STRONG: {"input": 5.0, "output": 25.0},
     MODEL_FAST: {"input": 3.0, "output": 15.0},
@@ -243,7 +242,7 @@ def _api_call(
 ):
     return client.messages.create(
         model=model,
-        max_tokens=16384,
+        max_tokens=MAX_TOKENS,
         system=[
             {
                 "type": "text",
@@ -519,6 +518,7 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
     empty_known_issues = summarize_known_issues([])
 
     token_totals: dict[str, int] = {MODEL_STRONG: 0, MODEL_FAST: 0}
+    call_counts: dict[str, int] = {MODEL_STRONG: 0, MODEL_FAST: 0}
 
     for chunk in chunks:
         for reviewer_name, config in REVIEWERS.items():
@@ -534,6 +534,7 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
                 to_review,
             )
             token_totals[model] += n
+            call_counts[model] += 1
             print(
                 f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer_name}[/cyan]: {n:,} input tokens"
             )
@@ -549,12 +550,18 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
         f"# FULL PAPER\n```latex\n{tex}\n```",
     )
     token_totals[MODEL_STRONG] += n
+    call_counts[MODEL_STRONG] += 1
     print(f"  [blue]Final referee[/blue]: {n:,} input tokens")
 
     total_input = sum(token_totals.values())
     input_cost = sum(
         count / 1e6 * MODEL_PRICING[model]["input"]
         for model, count in token_totals.items()
+    )
+    max_output_tokens = sum(calls * MAX_TOKENS for model, calls in call_counts.items())
+    max_output_cost = sum(
+        call_counts[model] * MAX_TOKENS / 1e6 * MODEL_PRICING[model]["output"]
+        for model in call_counts
     )
 
     print("\n[bold]Input tokens by model:[/bold]")
@@ -564,13 +571,19 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
     print(f"  Total: {total_input:,} tokens")
     print(f"[bold green]Estimated input cost: ${input_cost:.4f}[/bold green]")
     print(
-        "[yellow]Output token costs are not included (unknown until generation).[/yellow]"
+        f"[bold green]Max output cost (if all {sum(call_counts.values())} calls use {MAX_TOKENS:,} tokens): ${max_output_cost:.4f}[/bold green] ({max_output_tokens:,} tokens)"
+    )
+    print(
+        f"[bold green]Max total cost: ${input_cost + max_output_cost:.4f}[/bold green]"
     )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input")
+    parser = argparse.ArgumentParser(
+        "reviewer.py",
+        description="Run multiple LLM-based reviewers on a LaTeX document, aggregating their feedback into a final report.",
+    )
+    parser.add_argument("input", help="Path to the input .tex file to review.")
     parser.add_argument(
         "--output",
         default=None,
