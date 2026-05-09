@@ -38,6 +38,16 @@ class SeverityLevel(str, Enum):
     MODERATE = "moderate"
     MINOR = "minor"
 
+    @property
+    def numerical_level(self) -> int:
+        order = {
+            SeverityLevel.CRITICAL: 4,
+            SeverityLevel.MAJOR: 3,
+            SeverityLevel.MODERATE: 2,
+            SeverityLevel.MINOR: 1,
+        }
+        return order[self]
+
 
 class Issue(BaseModel):
     title: str
@@ -247,6 +257,8 @@ def summarize_known_issues(issues: list[IssueWithReviewer], limit: int = 15) -> 
         return "No previously detected issues."
 
     lines = []
+
+    issues = sorted(issues, key=lambda iss: iss.severity.numerical_level, reverse=True)
 
     for iss in issues[:limit]:
         lines.append(
