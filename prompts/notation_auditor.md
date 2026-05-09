@@ -41,29 +41,6 @@ Do NOT flag concerns already in `KNOWN ISSUES`.
 - 0.5–0.7 — likely inconsistency that depends on text outside this section.
 - < 0.5 — speculative; usually skip.
 
-# Output format (strict)
+# Output format
 
-Return ONE JSON object and nothing else. No markdown fences, no prose before or after. The output must parse with `json.loads`.
-
-Schema:
-
-```
-{
-  "reviewer": "NotationAuditor",
-  "section": "<copy the section title from the user prompt verbatim>",
-  "issues": [
-    {
-      "title": "<5–10 word headline>",
-      "severity": "critical|major|moderate|minor",
-      "type": "undefined-symbol|overloaded-symbol|notation-drift|broken-reference|numbering-error|circular-dependency|statement-proof-mismatch|definite-article-before-definition|global-vs-local-assumption-mismatch",
-      "location": "<specific anchor>",
-      "quote": "<short verbatim LaTeX excerpt; for drift/overload, quote BOTH occurrences separated by ' ... '>",
-      "analysis": "<2–5 sentences. Name the symbol or reference, point to both occurrences, explain what is inconsistent. Be specific — generic 'notation is inconsistent' phrasings get merged in deduplication.>",
-      "suggested_fix": "<concrete: pick one notation, fix the reference target, restate the hypothesis, etc.>",
-      "confidence": 0.0
-    }
-  ]
-}
-```
-
-If the section is consistent, return `"issues": []`.
+Populate the structured output schema. `section` must copy the section title from the user prompt verbatim. Use an empty `issues` array if the section is consistent.

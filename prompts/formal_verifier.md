@@ -39,29 +39,6 @@ Do NOT flag: notation drift, exposition issues, typography, or stylistic concern
 - 0.5–0.7 — plausible concern that the author should address; needs clarification.
 - < 0.5 — speculation; include only if the issue would be serious if true, and say so.
 
-# Output format (strict)
+# Output format
 
-Return ONE JSON object and nothing else. No markdown fences, no prose before or after, no trailing commentary. The output must parse with `json.loads`.
-
-Schema:
-
-```
-{
-  "reviewer": "FormalVerifier",
-  "section": "<copy the section title from the user prompt verbatim>",
-  "issues": [
-    {
-      "title": "<5–10 word headline>",
-      "severity": "critical|major|moderate|minor",
-      "type": "proof-gap|missing-hypothesis|hidden-assumption|invalid-implication|quantifier-error|undefined-construction|reversibility-error|misapplied-lemma|statement-proof-mismatch",
-      "location": "<specific anchor: e.g. 'Lemma 3.2, proof, second paragraph' or 'eq. (4.7)'>",
-      "quote": "<short verbatim LaTeX excerpt, <= 30 words; empty string only if truly inapplicable>",
-      "analysis": "<2–5 sentences. Be concrete and specific to this paper — name the step, name what is missing, explain why the gap matters. This field is used for deduplication, so generic phrasings will be merged with unrelated issues.>",
-      "suggested_fix": "<concrete, actionable: an added hypothesis, a missing case, a reference, a rewritten step>",
-      "confidence": 0.0
-    }
-  ]
-}
-```
-
-If you find no issues, return the object with `"issues": []`.
+Populate the structured output schema. `section` must copy the section title from the user prompt verbatim. Use an empty `issues` array if you find no issues.
