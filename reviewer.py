@@ -181,8 +181,13 @@ ABSTRACT_RE = re.compile(
 )
 
 # Matches \begin{theorem}...\end{theorem} across newlines.
-THEOREM_RE = re.compile(
-    r"\\begin\{theorem\}(.*?)\\end\{theorem\}",
+THEOREM_DEFINITION_RE = re.compile(
+    r"\\begin\{(theorem|definition)\}(.*?)\\end\{\1\}",
+    re.DOTALL,
+)
+
+PREAMBLE_RE = re.compile(
+    r"^(.*?)\\begin\{document\}",
     re.DOTALL,
 )
 
@@ -196,18 +201,20 @@ def extract_global_context(tex: str) -> str:
         parts.append("# ABSTRACT\n")
         parts.append(abstract_match.group(1))
 
-    preamble_match = re.search(r"\\begin\{document\}(.*?)\\section", tex, re.DOTALL)
+    preamble_match = PREAMBLE_RE.search(tex)
     if preamble_match:
         preamble = preamble_match.group(1).strip()
         if preamble:
             parts.append("\n# PREAMBLE\n")
             parts.append(preamble)
 
-    theorem_matches = THEOREM_RE.findall(tex)
-
-    if theorem_matches:
-        parts.append("\n# MAIN THEOREMS\n")
-        parts.extend(theorem_matches[:10])
+    parts.append("\n# MAIN THEOREMS AND DEFINITIONS\n")
+    for i, match in enumerate(THEOREM_DEFINITION_RE.finditer(tex)):
+        if i >= 15:
+            break
+        env_type = match.group(1).capitalize()
+        content = match.group(2).strip()
+        parts.append(f"## {env_type} {i + 1}\n\n{content}")
 
     return "\n\n".join(parts)
 
