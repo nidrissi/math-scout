@@ -41,4 +41,4 @@ Do NOT flag: notation drift, exposition issues, typography, or stylistic concern
 
 # Output format
 
-Populate the structured output schema. `section` must copy the section title from the user prompt verbatim. Use an empty `issues` array if you find no issues.
+Populate the structured output schema. Use an empty `issues` array if you find no issues.
