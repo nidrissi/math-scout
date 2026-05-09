@@ -184,6 +184,46 @@ def summarize_known_issues(issues: List[dict], limit: int = 15) -> str:
     return "\n".join(lines)
 
 
+def _api_call(
+    model: str,
+    system_prompt: str,
+    global_context: str,
+    known_issues: str,
+    to_review: str,
+):
+    return client.messages.create(
+        model=model,
+        max_tokens=16384,
+        system=[
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"# GLOBAL CONTEXT\n{global_context}",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {
+                        "type": "text",
+                        "text": f"# DETECTED ISSUES\n{known_issues}",
+                    },
+                    {
+                        "type": "text",
+                        "text": to_review,
+                    },
+                ],
+            },
+        ],
+    )
+
+
 def call_reviewer(
     reviewer_name: str,
     chunk: Chunk,
@@ -192,46 +232,18 @@ def call_reviewer(
 ) -> dict:
     """Send a section chunk to a named reviewer and return its parsed JSON issue report."""
     config = REVIEWERS[reviewer_name]
-
+    model = config["model"]
     system_prompt = (PROMPTS / config["prompt"]).read_text(encoding="utf-8")
-    user_prompt = f"""
-# GLOBAL CONTEXT
 
-{global_context}
-
-# KNOWN ISSUES
-
-{known_issues}
-
-# SECTION UNDER REVIEW
-
-SECTION TITLE: {chunk.name}
-
-```latex
-{chunk.content}
-```
-Return ONLY valid JSON."""
-
-    def _api_call():
-        return client.messages.create(
-            model=config["model"],
-            max_tokens=16384,
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                }
-            ],
+    response = _call_with_retry(
+        lambda: _api_call(
+            model=model,
+            system_prompt=system_prompt,
+            global_context=global_context,
+            known_issues=known_issues,
+            to_review=f"# SECTION UNDER REVIEW\n\nSECTION TITLE: {chunk.name}\n\n```latex\n{chunk.content}\n```",
         )
-
-    response = _call_with_retry(_api_call)
+    )
     text = extract_text(response)
     return json.loads(text)
 
@@ -279,33 +291,13 @@ def run_final_referee(
         indent=2,
     )
 
-    user_prompt = f"""
-# GLOBAL CONTEXT
-{global_context}
-# DETECTED ISSUES
-{issues_json}
-# FULL PAPER
-```latex
-{tex}
-```
-Produce a final referee report in markdown."""
     response = _call_with_retry(
-        lambda: client.messages.create(
+        lambda: _api_call(
             model=MODEL_STRONG,
-            max_tokens=16384,
-            system=[
-                {
-                    "type": "text",
-                    "text": system_prompt,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                }
-            ],
+            system_prompt=system_prompt,
+            global_context=global_context,
+            known_issues=issues_json,
+            to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
         )
     )
 
@@ -336,9 +328,18 @@ def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
         )
 
     global_context = extract_global_context(tex)
+    print(
+        f"[green]Extracted global context ({len(global_context)} chars):[/green]\n[gray]{global_context[:500]}{'…' if len(global_context) > 500 else ''}[/gray]"
+    )
+
+    print("Continue? [y/N]")
+    if input().strip().lower() not in ("y", "yes"):
+        print("[red]Aborting review.[/red]")
+        return
+
+    print("[bold blue]Starting multi-reviewer analysis...[/bold blue]")
 
     all_reviews = []
-
     for chunk in chunks:
         print(f"[bold blue]Reviewing:[/bold blue] {chunk.name}")
 
