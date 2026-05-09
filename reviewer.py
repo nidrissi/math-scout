@@ -13,12 +13,8 @@ import anthropic
 from rapidfuzz import fuzz
 from rich import print
 
-API_KEY = os.environ["ANTHROPIC_API_KEY"]
 MODEL_STRONG = "claude-opus-4-7"
 MODEL_FAST = "claude-sonnet-4-6"
-
-client = anthropic.Anthropic(api_key=API_KEY)
-
 
 ROOT = Path(__file__).parent.resolve()
 PROMPTS = ROOT / "prompts"
@@ -231,6 +227,7 @@ def summarize_known_issues(issues: List[dict], limit: int = 15) -> str:
 
 
 def _api_call(
+    client: anthropic.Anthropic,
     model: str,
     system_prompt: str,
     global_context: str,
@@ -275,6 +272,7 @@ def _api_call(
 
 
 def call_reviewer(
+    client: anthropic.Anthropic,
     reviewer_name: str,
     chunk: Chunk,
     global_context: str,
@@ -287,6 +285,7 @@ def call_reviewer(
 
     response = _call_with_retry(
         lambda: _api_call(
+            client=client,
             model=model,
             system_prompt=system_prompt,
             global_context=global_context,
@@ -331,6 +330,7 @@ def deduplicate_issues(issues: List[dict]) -> List[dict]:
 
 
 def run_final_referee(
+    client: anthropic.Anthropic,
     tex: str,
     deduped_issues: List[dict],
     global_context: str,
@@ -344,6 +344,7 @@ def run_final_referee(
 
     response = _call_with_retry(
         lambda: _api_call(
+            client=client,
             model=MODEL_STRONG,
             system_prompt=system_prompt,
             global_context=global_context,
@@ -355,7 +356,9 @@ def run_final_referee(
     return extract_text(response)
 
 
-def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
+def run_pipeline(
+    client: anthropic.Anthropic, tex_path: str, output_dir: Path | str | None = None
+) -> None:
     """Run the full multi-reviewer pipeline on a .tex file and write all outputs to *output_dir*."""
     if output_dir is None:
         output_dir = Path(tex_path).parent / "review"
@@ -408,10 +411,11 @@ def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
 
             try:
                 review = call_reviewer(
-                    reviewer_name,
-                    chunk,
-                    global_context,
-                    known_issues,
+                    client=client,
+                    reviewer_name=reviewer_name,
+                    chunk=chunk,
+                    global_context=global_context,
+                    known_issues=known_issues,
                 )
             except Exception as exc:
                 print(
@@ -436,20 +440,21 @@ def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
     for review in all_reviews:
         all_issues.extend(review.get("issues", []))
 
-    deduped = deduplicate_issues(all_issues)
+    deduped_issues = deduplicate_issues(all_issues)
 
     summary_path = output_dir / "deduped_issues.json"
 
     summary_path.write_text(
-        json.dumps(deduped, indent=2),
+        json.dumps(deduped_issues, indent=2),
         encoding="utf-8",
     )
 
     print("[bold blue]Running final referee synthesis...[/bold blue]")
     final_report = run_final_referee(
-        tex,
-        deduped,
-        global_context,
+        client=client,
+        tex=tex,
+        deduped_issues=deduped_issues,
+        global_context=global_context,
     )
 
     final_report_path = output_dir / "final_report.md"
@@ -460,7 +465,7 @@ def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
     )
 
     print("\n[bold green]Review complete.[/bold green]")
-    print(f"Unique issues detected: {len(deduped)}")
+    print(f"Unique issues detected: {len(deduped_issues)}")
 
 
 if __name__ == "__main__":
@@ -473,4 +478,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    run_pipeline(args.input, args.output)
+    API_KEY = os.environ["ANTHROPIC_API_KEY"]
+    client = anthropic.Anthropic(api_key=API_KEY)
+
+    run_pipeline(client, args.input, args.output)
