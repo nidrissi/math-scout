@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from enum import Enum
 import json
 import os
 import re
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import anthropic
 from rich import print
+from pydantic import BaseModel
 
 MODEL_STRONG = "claude-opus-4-7"
 MODEL_FAST = "claude-sonnet-4-6"
@@ -30,47 +32,27 @@ class Chunk:
     content: str  # raw LaTeX from this section's heading to the next one
 
 
-def _reviewer_schema(reviewer_name: str) -> dict:
-    """Return the top-level JSON Schema for a reviewer response."""
-    return {
-        "type": "object",
-        "properties": {
-            "reviewer": {"type": "string", "enum": [reviewer_name]},
-            "section": {"type": "string"},
-            "issues": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string"},
-                        "severity": {
-                            "type": "string",
-                            "enum": ["critical", "major", "moderate", "minor"],
-                        },
-                        "type": {"type": "string"},
-                        "location": {"type": "string"},
-                        "quote": {"type": "string"},
-                        "analysis": {"type": "string"},
-                        "suggested_fix": {"type": "string"},
-                        "confidence": {"type": "number"},
-                    },
-                    "required": [
-                        "title",
-                        "severity",
-                        "type",
-                        "location",
-                        "quote",
-                        "analysis",
-                        "suggested_fix",
-                        "confidence",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-        },
-        "required": ["reviewer", "section", "issues"],
-        "additionalProperties": False,
-    }
+class SeverityLevel(str, Enum):
+    CRITICAL = "critical"
+    MAJOR = "major"
+    MODERATE = "moderate"
+    MINOR = "minor"
+
+
+class Issue(BaseModel):
+    title: str
+    severity: SeverityLevel
+    type: str
+    location: str
+    quote: str
+    analysis: str
+    suggested_fix: str
+    confidence: float
+
+
+class Review(BaseModel):
+    section: str
+    issues: list[Issue]
 
 
 # Maps reviewer name → {prompt: filename under prompts/, model: model ID, schema: JSON Schema}.
@@ -78,22 +60,18 @@ REVIEWERS = {
     "FormalVerifier": {
         "prompt": "formal_verifier.md",
         "model": MODEL_STRONG,
-        "schema": _reviewer_schema("FormalVerifier"),
     },
     "AdversarialSkeptic": {
         "prompt": "adversarial_skeptic.md",
         "model": MODEL_STRONG,
-        "schema": _reviewer_schema("AdversarialSkeptic"),
     },
     "NotationAuditor": {
         "prompt": "notation_auditor.md",
         "model": MODEL_FAST,
-        "schema": _reviewer_schema("NotationAuditor"),
     },
     "ExpositionReferee": {
         "prompt": "exposition_referee.md",
         "model": MODEL_FAST,
-        "schema": _reviewer_schema("ExpositionReferee"),
     },
 }
 
@@ -215,7 +193,7 @@ def extract_global_context(tex: str) -> str:
     return "\n\n".join(parts)
 
 
-def load_known_issues(issues_file: Path) -> list[dict]:
+def load_known_issues(issues_file: Path) -> list[Issue]:
     """Load all issues from a JSONL file; returns an empty list if the file does not exist."""
     if not issues_file.exists():
         return []
@@ -224,37 +202,57 @@ def load_known_issues(issues_file: Path) -> list[dict]:
 
     with open(issues_file, "rb") as f:
         for line in f:
-            issues.append(json.loads(line))
+            issues.append(Issue.model_validate_json(line))
 
     return issues
 
 
-def format_all_issues(issues: list[dict]) -> str:
+def format_all_issues(issues: list[Issue]) -> str:
     if not issues:
         return "No previously detected issues."
 
     lines = []
     for iss in issues:
         lines.append(
-            f"- **[{iss['reviewer']} - {iss['severity'].upper()}] {iss['title']}**\n"
-            f"  *Location:* {iss['location']}\n"
-            f"  *Analysis:* {iss['analysis']}\n"
-            f"  *Fix:* {iss['suggested_fix']}\n"
+            f"- **[{iss.severity.upper()}] {iss.title}**\n"
+            f"  *Location:* {iss.location}\n"
+            f"  *Analysis:* {iss.analysis}\n"
+            f"  *Fix:* {iss.suggested_fix}\n"
         )
     return "\n".join(lines)
 
 
-def summarize_known_issues(issues: list[dict], limit: int = 15) -> str:
+def summarize_known_issues(issues: list[Issue], limit: int = 15) -> str:
     """Format the first *limit* known issues as a bullet list for injection into reviewer prompts."""
     if not issues:
         return "No previously detected issues."
 
     lines = []
 
-    for issue in issues[:limit]:
-        lines.append(f"- [{issue['severity']}] {issue['location']}: {issue['title']}")
+    for iss in issues[:limit]:
+        lines.append(f"- [{iss.severity}] {iss.location}: {iss.title}")
 
     return "\n".join(lines)
+
+
+def _api_call_with_schema(
+    client: anthropic.Anthropic,
+    model: str,
+    system_prompt: str,
+    global_context: str,
+    known_issues: str,
+    to_review: str,
+):
+    system, messages = create_review_context(
+        system_prompt, global_context, known_issues, to_review
+    )
+    return client.messages.parse(
+        model=model,
+        max_tokens=MAX_TOKENS,
+        system=system,
+        messages=messages,
+        output_format=Review,
+    )
 
 
 def _api_call(
@@ -264,35 +262,42 @@ def _api_call(
     global_context: str,
     known_issues: str,
     to_review: str,
-    json_schema: dict[str, object] | None = None,
 ):
+    system, messages = create_review_context(
+        system_prompt, global_context, known_issues, to_review
+    )
     return client.messages.create(
         model=model,
         max_tokens=MAX_TOKENS,
-        cache_control={"type": "ephemeral"},
-        system=[
-            {
-                "type": "text",
-                "text": f"# GLOBAL CONTEXT\n{global_context}",
-            },
-            {
-                "type": "text",
-                "text": "# REVIEWER PROMPT\n" + system_prompt,
-            },
-        ],
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"},
-                    {"type": "text", "text": to_review},
-                ],
-            },
-        ],
-        output_config={"format": {"type": "json_schema", "schema": json_schema}}
-        if json_schema
-        else anthropic.omit,
+        system=system,
+        messages=messages,
     )
+
+
+def create_review_context(
+    system_prompt: str, global_context: str, known_issues: str, to_review: str
+):
+    system: list[anthropic.types.TextBlockParam] = [
+        {
+            "type": "text",
+            "text": f"# GLOBAL CONTEXT\n{global_context}",
+        },
+        {
+            "type": "text",
+            "text": "# REVIEWER PROMPT\n" + system_prompt,
+        },
+    ]
+    messages: list[anthropic.types.MessageParam] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"},
+                {"type": "text", "text": to_review},
+            ],
+        },
+    ]
+
+    return system, messages
 
 
 def _format_section(chunk: Chunk) -> str:
@@ -307,7 +312,7 @@ def _count_tokens(
     global_context: str,
     known_issues: str,
     to_review: str,
-    json_schema: dict[str, object] | None = None,
+    with_schema: bool,
 ) -> int:
     """Return the input-token count for one API call without generating a response."""
     return client.messages.count_tokens(
@@ -332,9 +337,7 @@ def _count_tokens(
                 ],
             }
         ],
-        output_config={"format": {"type": "json_schema", "schema": json_schema}}
-        if json_schema
-        else anthropic.omit,
+        output_format=Review if with_schema else anthropic.omit,
     ).input_tokens
 
 
@@ -344,30 +347,33 @@ def call_reviewer(
     chunk: Chunk,
     global_context: str,
     known_issues: str,
-) -> dict:
+):
     """Send a section chunk to a named reviewer and return its parsed JSON issue report."""
     config = REVIEWERS[reviewer_name]
     model = config["model"]
     system_prompt = (PROMPTS / config["prompt"]).read_text(encoding="utf-8")
 
     response = _call_with_retry(
-        lambda: _api_call(
+        lambda: _api_call_with_schema(
             client=client,
             model=model,
             system_prompt=system_prompt,
             global_context=global_context,
             known_issues=known_issues,
             to_review=_format_section(chunk),
-            json_schema=config["schema"],
         )
     )
-    text = extract_text(response)
-    return json.loads(text)
+
+    if not response or not response.parsed_output:
+        raise ValueError(
+            f"No parsed output from reviewer {reviewer_name} on section '{chunk.name}'"
+        )
+
+    return response.parsed_output
 
 
-def append_issues(review_json: dict, issues_file: Path) -> None:
+def append_issues(issues: list[Issue], issues_file: Path) -> None:
     """Append each issue from a reviewer's JSON response as a separate line to the JSONL issues file."""
-    issues = review_json.get("issues", [])
     with open(issues_file, "ab") as f:
         for issue in issues:
             f.write(json.dumps(issue).encode("utf-8"))
@@ -377,7 +383,7 @@ def append_issues(review_json: dict, issues_file: Path) -> None:
 def run_final_referee(
     client: anthropic.Anthropic,
     tex: str,
-    issues: list[dict],
+    issues: list[Issue],
     global_context: str,
 ) -> str:
     """Synthesize a final markdown referee report from the full paper and the deduplicated issue list."""
@@ -440,7 +446,7 @@ def run_pipeline(
 
     print("[bold blue]Starting multi-reviewer analysis...[/bold blue]")
 
-    all_reviews = []
+    all_reviews: list[Review] = []
     for chunk in chunks:
         print(f"[bold blue]Reviewing:[/bold blue] {chunk.name}")
 
@@ -470,11 +476,9 @@ def run_pipeline(
                 )
                 continue
 
-            print(
-                f"  [green]Success: {len(review.get('issues', []))} issues detected.[/green]"
-            )
+            print(f"  [green]Success: {len(review.issues)} issues detected.[/green]")
 
-            append_issues(review, issues_file)
+            append_issues(review.issues, issues_file)
             all_reviews.append(review)
 
             out_path.write_text(
@@ -482,10 +486,10 @@ def run_pipeline(
                 encoding="utf-8",
             )
 
-    all_issues: list[dict] = []
+    all_issues: list[Issue] = []
 
     for review in all_reviews:
-        all_issues.extend(review.get("issues", []))
+        all_issues.extend(review.issues)
 
     summary_path = output_dir / "deduped_issues.json"
 
@@ -534,7 +538,6 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
         for reviewer_name, config in REVIEWERS.items():
             model = config["model"]
             system_prompt = (PROMPTS / config["prompt"]).read_text(encoding="utf-8")
-            schema = config["schema"]
             to_review = _format_section(chunk)
             n = _count_tokens(
                 client,
@@ -543,7 +546,7 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
                 global_context,
                 empty_known_issues,
                 to_review,
-                json_schema=schema,
+                with_schema=False,
             )
             token_totals[model] += n
             call_counts[model] += 1
@@ -560,6 +563,7 @@ def run_dry_run(client: anthropic.Anthropic, tex_path: str) -> None:
         global_context,
         "[]",  # no deduped issues available in dry run
         f"# FULL PAPER\n```latex\n{tex}\n```",
+        with_schema=True,
     )
     token_totals[MODEL_STRONG] += n
     call_counts[MODEL_STRONG] += 1
