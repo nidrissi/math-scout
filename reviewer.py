@@ -320,12 +320,21 @@ def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
         output_dir = Path(output_dir)
     reviews_dir = output_dir / "reviews"
     issues_file = output_dir / "issues.jsonl"
+    chunks_dir = output_dir / "chunks"
 
     output_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(exist_ok=True)
+    chunks_dir.mkdir(exist_ok=True)
     tex = load_tex(tex_path)
 
     chunks = chunk_by_section(tex)
+    for chunk in chunks:
+        chunk_path = chunks_dir / f"{chunk.name}.tex"
+        chunk_path.write_text(chunk.content, encoding="utf-8")
+        print(
+            f"[green]Extracted chunk:[/green] {chunk.name} (written to {chunk_path}, {len(chunk.content)} chars)"
+        )
+
     global_context = extract_global_context(tex)
 
     all_reviews = []
@@ -357,6 +366,10 @@ def run_pipeline(tex_path: str, output_dir: Path | str | None = None) -> None:
                     f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]"
                 )
                 continue
+
+            print(
+                f"  [green]Success: {len(review.get('issues', []))} issues detected.[/green]"
+            )
 
             append_issues(review, issues_file)
             all_reviews.append(review)
