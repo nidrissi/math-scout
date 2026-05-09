@@ -41,29 +41,6 @@ Do NOT duplicate concerns already in `KNOWN ISSUES`.
 - 0.5–0.7 — taste-dependent; some readers will be fine, others won't.
 - < 0.5 — usually skip; exposition is taste-laden and false positives are costly.
 
-# Output format (strict)
+# Output format
 
-Return ONE JSON object and nothing else. No markdown fences, no prose before or after. The output must parse with `json.loads`.
-
-Schema:
-
-```
-{
-  "reviewer": "ExpositionReferee",
-  "section": "<copy the section title from the user prompt verbatim>",
-  "issues": [
-    {
-      "title": "<5–10 word headline>",
-      "severity": "critical|major|moderate|minor",
-      "type": "compressed-argument|missing-intuition|abrupt-transition|opaque-strategy|excessive-symbol-density|missing-motivation|missing-example|poor-organization",
-      "location": "<specific anchor>",
-      "quote": "<short verbatim LaTeX excerpt of the unclear passage>",
-      "analysis": "<2–5 sentences. Name the passage, say specifically what is unclear and to whom, and why it matters for following the argument. Avoid generic 'this is unclear' — that gets merged in deduplication.>",
-      "suggested_fix": "<concrete rewrite or addition: 'insert one sentence stating X', 'give the n=2 example before the general proof', etc.>",
-      "confidence": 0.0
-    }
-  ]
-}
-```
-
-If the section reads well, return `"issues": []`.
+Populate the structured output schema. `section` must copy the section title from the user prompt verbatim. Use an empty `issues` array if the section reads well.

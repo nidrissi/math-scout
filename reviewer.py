@@ -32,23 +32,71 @@ class Chunk:
     content: str  # raw LaTeX from this section's heading to the next one
 
 
-# Maps reviewer name → {prompt: filename under prompts/, model: model ID}.
+_SEVERITY = {"type": "string", "enum": ["critical", "major", "moderate", "minor"]}
+_CONFIDENCE = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+
+
+def _reviewer_schema(reviewer_name: str) -> dict:
+    """Return the top-level JSON Schema for a reviewer response."""
+    return {
+        "type": "object",
+        "properties": {
+            "reviewer": {"type": "string", "enum": [reviewer_name]},
+            "section": {"type": "string"},
+            "issues": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "severity": _SEVERITY,
+                        "type": {"type": "string"},
+                        "location": {"type": "string"},
+                        "quote": {"type": "string"},
+                        "analysis": {"type": "string"},
+                        "suggested_fix": {"type": "string"},
+                        "confidence": _CONFIDENCE,
+                    },
+                    "required": [
+                        "title",
+                        "severity",
+                        "type",
+                        "location",
+                        "quote",
+                        "analysis",
+                        "suggested_fix",
+                        "confidence",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["reviewer", "section", "issues"],
+        "additionalProperties": False,
+    }
+
+
+# Maps reviewer name → {prompt: filename under prompts/, model: model ID, schema: JSON Schema}.
 REVIEWERS = {
     "FormalVerifier": {
         "prompt": "formal_verifier.md",
         "model": MODEL_STRONG,
+        "schema": _reviewer_schema("FormalVerifier"),
     },
     "AdversarialSkeptic": {
         "prompt": "adversarial_skeptic.md",
         "model": MODEL_STRONG,
+        "schema": _reviewer_schema("AdversarialSkeptic"),
     },
     "NotationAuditor": {
         "prompt": "notation_auditor.md",
         "model": MODEL_FAST,
+        "schema": _reviewer_schema("NotationAuditor"),
     },
     "ExpositionReferee": {
         "prompt": "exposition_referee.md",
         "model": MODEL_FAST,
+        "schema": _reviewer_schema("ExpositionReferee"),
     },
 }
 
@@ -188,6 +236,7 @@ def _api_call(
     global_context: str,
     known_issues: str,
     to_review: str,
+    json_schema: dict[str, object] | None = None,
 ):
     return client.messages.create(
         model=model,
@@ -219,6 +268,9 @@ def _api_call(
                 ],
             },
         ],
+        output_config={"format": {"type": "json_schema", "schema": json_schema}}
+        if json_schema
+        else anthropic.omit,
     )
 
 
@@ -240,6 +292,7 @@ def call_reviewer(
             global_context=global_context,
             known_issues=known_issues,
             to_review=f"# SECTION UNDER REVIEW\n\nSECTION TITLE: {chunk.name}\n\n```latex\n{chunk.content}\n```",
+            json_schema=config["schema"],
         )
     )
     text = extract_text(response)

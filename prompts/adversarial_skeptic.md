@@ -41,29 +41,6 @@ Do NOT flag exposition or notation issues unless they hide a real mathematical r
 - 0.5–0.7 — plausible weakness; author should rule it out.
 - < 0.5 — speculative probe; include only if a positive answer would matter.
 
-# Output format (strict)
+# Output format
 
-Return ONE JSON object and nothing else. No markdown fences, no prose before or after. The output must parse with `json.loads`.
-
-Schema:
-
-```
-{
-  "reviewer": "AdversarialSkeptic",
-  "section": "<copy the section title from the user prompt verbatim>",
-  "issues": [
-    {
-      "title": "<5–10 word headline>",
-      "severity": "critical|major|moderate|minor",
-      "type": "edge-case|degenerate-case|non-uniformity|missing-finiteness|illegal-limit-exchange|misuse-of-genericity|unproved-existence|brittle-reduction|silent-standard-fact|perturbation-fragility",
-      "location": "<specific anchor: e.g. 'proof of Theorem 2.4, step 3' or 'after eq. (5.1)'>",
-      "quote": "<short verbatim LaTeX excerpt, <= 30 words>",
-      "analysis": "<2–5 sentences. Name the specific failure mode and the specific step in this paper that is exposed to it. This field is used for deduplication — generic stress-test language will be merged across unrelated issues.>",
-      "suggested_fix": "<concrete: an added hypothesis, an explicit case split, a justification the author should supply, a candidate counterexample to address>",
-      "confidence": 0.0
-    }
-  ]
-}
-```
-
-If the section survives stress-testing, return `"issues": []`.
+Populate the structured output schema. `section` must copy the section title from the user prompt verbatim. Use an empty `issues` array if the section survives stress-testing.
