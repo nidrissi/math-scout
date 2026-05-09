@@ -196,6 +196,13 @@ def extract_global_context(tex: str) -> str:
         parts.append("# ABSTRACT\n")
         parts.append(abstract_match.group(1))
 
+    preamble_match = re.search(r"\\begin\{document\}(.*?)\\section", tex, re.DOTALL)
+    if preamble_match:
+        preamble = preamble_match.group(1).strip()
+        if preamble:
+            parts.append("\n# PREAMBLE\n")
+            parts.append(preamble)
+
     theorem_matches = THEOREM_RE.findall(tex)
 
     if theorem_matches:
