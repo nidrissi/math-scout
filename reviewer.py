@@ -9,9 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
-import anthropic as _anthropic
-
-from anthropic import Anthropic
+import anthropic
 from rapidfuzz import fuzz
 from rich import print
 
@@ -19,7 +17,7 @@ API_KEY = os.environ["ANTHROPIC_API_KEY"]
 MODEL_STRONG = "claude-opus-4-7"
 MODEL_FAST = "claude-sonnet-4-6"
 
-client = Anthropic(api_key=API_KEY)
+client = anthropic.Anthropic(api_key=API_KEY)
 
 
 ROOT = Path(__file__).parent.resolve()
@@ -81,9 +79,9 @@ def _call_with_retry(fn, retries: int = 3, base_delay: float = 5.0):
         try:
             return fn()
         except (
-            _anthropic.RateLimitError,
-            _anthropic.APIConnectionError,
-            _anthropic.APITimeoutError,
+            anthropic.RateLimitError,
+            anthropic.APIConnectionError,
+            anthropic.APITimeoutError,
         ) as exc:
             if attempt == retries:
                 raise
@@ -92,7 +90,7 @@ def _call_with_retry(fn, retries: int = 3, base_delay: float = 5.0):
                 f"[yellow]Transient error ({exc.__class__.__name__}), retrying in {delay:.0f}s…[/yellow]"
             )
             time.sleep(delay)
-        except _anthropic.APIStatusError as exc:
+        except anthropic.APIStatusError as exc:
             if exc.status_code >= 500 and attempt < retries:
                 delay = base_delay * (2**attempt)
                 print(
