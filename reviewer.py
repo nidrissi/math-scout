@@ -50,6 +50,25 @@ class Issue(BaseModel):
     confidence: float
 
 
+class IssueWithReviewer(Issue):
+    reviewer: str
+
+
+def attribute_issue(issue: Issue, reviewer_name: str) -> IssueWithReviewer:
+    """Return a copy of *issue* with the *reviewer* field set to *reviewer_name*."""
+    return IssueWithReviewer(
+        title=issue.title,
+        severity=issue.severity,
+        type=issue.type,
+        location=issue.location,
+        quote=issue.quote,
+        analysis=issue.analysis,
+        suggested_fix=issue.suggested_fix,
+        confidence=issue.confidence,
+        reviewer=reviewer_name,
+    )
+
+
 class Review(BaseModel):
     section: str
     issues: list[Issue]
@@ -193,7 +212,7 @@ def extract_global_context(tex: str) -> str:
     return "\n\n".join(parts)
 
 
-def load_known_issues(issues_file: Path) -> list[Issue]:
+def load_known_issues(issues_file: Path) -> list[IssueWithReviewer]:
     """Load all issues from a JSONL file; returns an empty list if the file does not exist."""
     if not issues_file.exists():
         return []
@@ -202,19 +221,19 @@ def load_known_issues(issues_file: Path) -> list[Issue]:
 
     with open(issues_file, "rb") as f:
         for line in f:
-            issues.append(Issue.model_validate_json(line))
+            issues.append(IssueWithReviewer.model_validate_json(line))
 
     return issues
 
 
-def format_all_issues(issues: list[Issue]) -> str:
+def format_all_issues(issues: list[IssueWithReviewer]) -> str:
     if not issues:
         return "No previously detected issues."
 
     lines = []
     for iss in issues:
         lines.append(
-            f"- **[{iss.severity.upper()}] {iss.title}**\n"
+            f"- **[{iss.reviewer} - {iss.severity.upper()}] {iss.title}**\n"
             f"  *Location:* {iss.location}\n"
             f"  *Analysis:* {iss.analysis}\n"
             f"  *Fix:* {iss.suggested_fix}\n"
@@ -222,7 +241,7 @@ def format_all_issues(issues: list[Issue]) -> str:
     return "\n".join(lines)
 
 
-def summarize_known_issues(issues: list[Issue], limit: int = 15) -> str:
+def summarize_known_issues(issues: list[IssueWithReviewer], limit: int = 15) -> str:
     """Format the first *limit* known issues as a bullet list for injection into reviewer prompts."""
     if not issues:
         return "No previously detected issues."
@@ -230,7 +249,9 @@ def summarize_known_issues(issues: list[Issue], limit: int = 15) -> str:
     lines = []
 
     for iss in issues[:limit]:
-        lines.append(f"- [{iss.severity}] {iss.location}: {iss.title}")
+        lines.append(
+            f"- [{iss.reviewer} - {iss.severity.upper()}] {iss.location}: {iss.title}"
+        )
 
     return "\n".join(lines)
 
@@ -372,7 +393,7 @@ def call_reviewer(
     return response.parsed_output
 
 
-def append_issues(issues: list[Issue], issues_file: Path) -> None:
+def append_issues(issues: list[IssueWithReviewer], issues_file: Path) -> None:
     """Append each issue from a reviewer's JSON response as a separate line to the JSONL issues file."""
     with open(issues_file, "ab") as f:
         for issue in issues:
@@ -383,7 +404,7 @@ def append_issues(issues: list[Issue], issues_file: Path) -> None:
 def run_final_referee(
     client: anthropic.Anthropic,
     tex: str,
-    issues: list[Issue],
+    issues: list[IssueWithReviewer],
     global_context: str,
 ) -> str:
     """Synthesize a final markdown referee report from the full paper and the deduplicated issue list."""
@@ -446,18 +467,17 @@ def run_pipeline(
 
     print("[bold blue]Starting multi-reviewer analysis...[/bold blue]")
 
-    all_reviews: list[Review] = []
+    all_issues: list[IssueWithReviewer] = load_known_issues(issues_file)
     for chunk in chunks:
         print(f"[bold blue]Reviewing:[/bold blue] {chunk.name}")
 
-        known_issues = summarize_known_issues(load_known_issues(issues_file))
+        known_issues = summarize_known_issues(all_issues)
 
         for reviewer_name in REVIEWERS:
             out_path = reviews_dir / f"{chunk.name}_{reviewer_name}.json"
 
             if out_path.exists():
                 print(f"  -> {reviewer_name} [yellow](resuming from disk)[/yellow]")
-                all_reviews.append(json.loads(out_path.read_text(encoding="utf-8")))
                 continue
 
             print(f"  -> {reviewer_name}")
@@ -478,18 +498,19 @@ def run_pipeline(
 
             print(f"  [green]Success: {len(review.issues)} issues detected.[/green]")
 
-            append_issues(review.issues, issues_file)
-            all_reviews.append(review)
+            attributed_issues = [
+                attribute_issue(iss, reviewer_name) for iss in review.issues
+            ]
+            append_issues(
+                attributed_issues,
+                issues_file,
+            )
+            all_issues.extend(attributed_issues)
 
             out_path.write_text(
                 json.dumps(review, indent=2),
                 encoding="utf-8",
             )
-
-    all_issues: list[Issue] = []
-
-    for review in all_reviews:
-        all_issues.extend(review.issues)
 
     summary_path = output_dir / "deduped_issues.json"
 
