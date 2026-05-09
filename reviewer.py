@@ -224,10 +224,20 @@ PREAMBLE_RE = re.compile(
     re.DOTALL,
 )
 
+TITLE_RE = re.compile(
+    r"\\title\{([^{}]*)\}",
+)
+
 
 def extract_global_context(tex: str) -> str:
     """Extract the abstract, preamble, and up to 15 theorems/definitions as shared context."""
     parts = []
+
+    title_match = TITLE_RE.search(tex)
+    if title_match:
+        title = title_match.group(1).strip()
+        if title:
+            parts.insert(0, f"# PAPER TITLE\n\n{title}")
 
     abstract_match = ABSTRACT_RE.search(tex)
     if abstract_match:
