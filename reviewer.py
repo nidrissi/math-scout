@@ -102,7 +102,8 @@ REVIEWERS = {
 }
 
 # Matches \section{...} and \section*{...} headings.
-SECTION_RE = re.compile(r"\\section\*?\{(.+?)\}")
+# Hacky: at most one level of nested braces in section titles is supported, which is typically enough.
+SECTION_RE = re.compile(r"\\section\*?\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}")
 
 
 def extract_text(response) -> str:
