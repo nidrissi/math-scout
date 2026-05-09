@@ -210,7 +210,7 @@ SECTION TITLE: {chunk.name}
 ```latex
 {chunk.content}
 ```
-Return ONLY valid JSON. """
+Return ONLY valid JSON."""
 
     def _api_call():
         return client.messages.create(
@@ -231,17 +231,9 @@ Return ONLY valid JSON. """
             ],
         )
 
-    for json_attempt in range(3):
-        response = _call_with_retry(_api_call)
-        text = extract_text(response)
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            if json_attempt == 2:
-                raise
-            print(
-                f"[yellow]JSON parse failed (attempt {json_attempt + 1}/3), retrying…[/yellow]"
-            )
+    response = _call_with_retry(_api_call)
+    text = extract_text(response)
+    return json.loads(text)
 
 
 def append_issues(review_json: dict, issues_file: Path) -> None:
