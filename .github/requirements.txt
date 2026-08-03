@@ -1,4 +1,0 @@
-anthropic==0.100.0
-pydantic==2.13.4
-RapidFuzz==3.14.5
-rich==15.0.0
