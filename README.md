@@ -1,46 +1,191 @@
 # LLM Reviewer
 
-A multi-agent pipeline that reviews mathematical papers (LaTeX) using Claude. It runs four specialized reviewers over each section of a paper and synthesizes a final referee report.
+[![CI](https://github.com/nidrissi/llm-reviewer/actions/workflows/ci.yml/badge.svg)](https://github.com/nidrissi/llm-reviewer/actions/workflows/ci.yml)
+
+A multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a
+`.tex` file into sections, runs four specialised Claude-based reviewers over each one,
+and synthesises a final referee report in markdown.
+
+> **Alpha software.** It works and it is useful, but interfaces, prompts, and output
+> formats will change without notice, and there is no backwards-compatibility promise
+> before 1.0. Please report what breaks.
+
+## What it is, and what it isn't
+
+It is a **first-pass reading aid**. It is good at the mechanical parts of refereeing:
+spotting undefined notation, unstated hypotheses, gaps between "clearly" and the actual
+argument, and passages that assume more than they say.
+
+It is **not a referee**, and its output is not a referee report you can rely on. It will
+miss real errors and it will confidently flag correct arguments as broken. Every issue it
+raises needs a human to verify it before you act on it, and a clean report is not evidence
+that a paper is correct. Treat it as a colleague who read the paper quickly, not as a
+proof checker.
 
 ## Reviewers
 
-| Agent | Model | Role |
+| Agent | Tier | Role |
 |---|---|---|
-| `FormalVerifier` | Opus | Proof gaps, invalid inferences, missing hypotheses |
-| `AdversarialSkeptic` | Opus | Edge cases, brittle arguments, degenerate examples |
-| `NotationAuditor` | Sonnet | Symbol consistency, undefined notation, broken references |
-| `ExpositionReferee` | Sonnet | Readability, missing intuition, proof strategy clarity |
+| `FormalVerifier` | strong | Proof gaps, invalid inferences, missing hypotheses |
+| `AdversarialSkeptic` | strong | Edge cases, brittle arguments, degenerate examples |
+| `NotationAuditor` | fast | Symbol consistency, undefined notation, broken references |
+| `ExpositionReferee` | fast | Readability, missing intuition, proof strategy clarity |
 
-Each reviewer outputs structured JSON issues (`title`, `severity`, `type`, `location`, `quote`, `analysis`, `suggested_fix`, `confidence`). Non-mathematical sections (References, Bibliography, Acknowledgments) are skipped automatically.
+Each reviewer returns structured JSON issues (`title`, `severity`, `type`, `location`,
+`quote`, `analysis`, `suggested_fix`, `confidence`). A final referee pass then synthesises
+all of them into one report. Non-mathematical sections (References, Bibliography,
+Acknowledgments) are skipped automatically.
 
-## Setup
+## Requirements
+
+- Python 3.11 or newer
+- An Anthropic API key with credit on it
+
+## Install
+
+With [uv](https://docs.astral.sh/uv/), no checkout needed:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install anthropic rich
+uvx --from git+https://github.com/nidrissi/llm-reviewer llm-reviewer paper.tex --dry-run
 ```
+
+Or from a clone:
+
+```bash
+git clone https://github.com/nidrissi/llm-reviewer
+cd llm-reviewer
+uv sync
+uv run llm-reviewer paper.tex --dry-run
+```
+
+## Credentials
+
+Either export a key:
+
+```bash
+export ANTHROPIC_API_KEY=...
+```
+
+…or sign in once with the [Anthropic CLI](https://platform.claude.com/docs/en/api/sdks/cli)
+and the stored profile is picked up automatically:
+
+```bash
+ant auth login
+```
+
+Don't pass the key inline on the command line — it ends up in your shell history.
+
+## Cost
+
+**Start with `--dry-run`.** A full review makes one API call per section per reviewer,
+plus one whole-paper call at the end, and reads the entire paper each time. On a long
+paper that adds up to real money.
+
+```bash
+llm-reviewer paper.tex --dry-run
+```
+
+This counts input tokens and prints a cost estimate without sending a single generation
+request. The estimate is a rough lower bound: it excludes the accumulated "known issues"
+context that grows during a run, and it does not model prompt-cache savings, which cut
+repeat input cost substantially.
+
+Before a real run starts, the tool prints the chunks it extracted and asks you to confirm.
+
+## Privacy
+
+Running this **sends the full text of your paper to the Anthropic API**. If the paper is
+unpublished, under embargo, covered by a collaboration agreement, or contains anything you
+are not free to disclose to a third party, that matters — decide deliberately. See
+Anthropic's [privacy policy](https://www.anthropic.com/legal/privacy) and
+[data usage terms](https://privacy.claude.com/en/articles/10023548-how-do-you-use-my-data)
+for how the data is handled.
 
 ## Usage
 
 ```bash
-export ANTHROPIC_API_KEY=your_key
-python reviewer.py path/to/paper.tex
-python reviewer.py path/to/paper.tex --output path/to/output_dir
-python reviewer.py path/to/paper.tex --dry-run   # token count + cost estimate only
+llm-reviewer paper.tex                          # review, with a confirmation prompt
+llm-reviewer paper.tex --output /tmp/review     # choose the output directory
+llm-reviewer paper.tex --dry-run                # token count + cost estimate only
+llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/scripts)
 ```
 
-The `--output` argument is optional. When omitted, output is written to a `review/` directory next to the input file.
+| Flag | Meaning |
+|---|---|
+| `--output DIR` | Where to write results (default: `<input_dir>/review/`) |
+| `--dry-run` | Count tokens and estimate cost; send no generation requests |
+| `-y`, `--yes` | Skip the confirmation prompt. Required when stdin is not a terminal |
+| `--strong-model ID` | Model for the two deep reviewers and the final referee |
+| `--fast-model ID` | Model for the two lighter reviewers |
+| `--max-tokens N` | Output token limit per call (default 8192) |
+| `--version` | Print the version |
 
-If the pipeline is interrupted, re-running the same command resumes from where it left off — completed reviewer calls are detected from the per-chunk JSON files and skipped.
+Exit codes: `0` success, `1` finished but some reviewer calls failed, `2` bad
+configuration (no credentials, unknown model, nothing to review, no confirmation).
+
+### Multi-file papers
+
+`\input{...}` and `\include{...}` are resolved and inlined before chunking, relative to
+the main file's directory and then the including file's. Commented-out references are
+ignored, cycles are broken, and a reference that can't be found is left alone with a
+warning rather than aborting the run.
+
+### Choosing models
+
+Defaults are `claude-opus-4-7` for the strong tier and `claude-sonnet-4-6` for the fast
+tier. To use newer models:
+
+```bash
+llm-reviewer paper.tex --strong-model claude-opus-5 --fast-model claude-sonnet-5 \
+  --max-tokens 32000
+```
+
+Raise `--max-tokens` when switching to a model where extended thinking is on by default:
+the limit covers thinking and response text together, so leaving it at 8192 can truncate a
+reviewer's JSON mid-object. Cost estimates are available for the models listed in
+`MODEL_PRICING`; any other ID still runs, but `--dry-run` will report token counts without
+a price.
+
+### Resuming
+
+If a run is interrupted, re-running the same command picks up where it left off. Completed
+reviewer calls are detected from the per-chunk JSON files and skipped, so you only pay for
+what's missing.
 
 ## Output
 
-All output is written to the output directory (default: `<input_dir>/review/`):
+Everything lands in the output directory (default `<input_dir>/review/`):
 
 | File | Contents |
 |---|---|
-| `reviews/<section>_<reviewer>.json` | Raw JSON from each reviewer per section |
-| `issues.jsonl` | All issues appended incrementally (one JSON object per line) |
-| `all_issues.json` | All issues as a JSON array |
-| `final_report.md` | Final referee report in markdown |
+| `final_report.md` | The final referee report — start here |
+| `chunks/NN_<section>.tex` | The exact LaTeX each reviewer saw |
+| `reviews/NN_<section>_<reviewer>.json` | Raw JSON from each reviewer per section |
+| `issues.jsonl` | Every issue, appended as it is found (one JSON object per line) |
+| `all_issues.json` | The same issues as a single JSON array |
+
+If any reviewer call fails, the run says so, the final report is told to state its own
+coverage gaps, and the exit code is `1`. A failing run never silently presents partial
+findings as complete.
+
+## Known limitations
+
+- **Sequential.** Reviewers run one at a time, because each pass is shown the issues found
+  so far. A ten-section paper is over forty serial API calls, so expect it to be slow.
+- **`\section` only.** Documents structured with `\chapter`, or with no sectioning at all,
+  produce nothing to review and exit with an error.
+- **Resume can lose issues.** If the process is killed between writing a reviewer's JSON
+  and appending to `issues.jsonl`, those issues are missing on resume. The alternative
+  ordering duplicates issues instead, which is worse.
+- **Reviewers only see one section at a time**, plus a shared global context (title,
+  abstract, preamble, first 15 theorems/definitions). Errors that only appear when two
+  distant sections are read together are likely to be missed.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and papers that break the chunker are
+especially welcome — [open an issue](https://github.com/nidrissi/llm-reviewer/issues).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

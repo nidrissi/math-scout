@@ -1,0 +1,48 @@
+[project]
+name = "llm-reviewer"
+version = "0.1.0a1"
+description = "A multi-agent pipeline that reviews mathematical papers written in LaTeX."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Najib Idrissi-Kaïtouni" }]
+keywords = ["latex", "mathematics", "peer-review", "claude", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Text Processing :: Markup :: LaTeX",
+]
+dependencies = ["anthropic>=0.100", "pydantic>=2.13", "rich>=15"]
+
+[project.urls]
+Homepage = "https://github.com/nidrissi/llm-reviewer"
+Issues = "https://github.com/nidrissi/llm-reviewer/issues"
+
+[project.scripts]
+llm-reviewer = "llm_reviewer.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_reviewer"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.9"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
