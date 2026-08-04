@@ -24,17 +24,24 @@ proof checker.
 
 ## Reviewers
 
-| Agent | Tier | Role |
-|---|---|---|
-| `FormalVerifier` | strong | Proof gaps, invalid inferences, missing hypotheses |
-| `AdversarialSkeptic` | strong | Edge cases, brittle arguments, degenerate examples |
-| `NotationAuditor` | fast | Symbol consistency, undefined notation, broken references |
-| `ExpositionReferee` | fast | Readability, missing intuition, proof strategy clarity |
+| Agent | Tier | Thinks | Role |
+|---|---|---|---|
+| `FormalVerifier` | strong | yes | Proof gaps, invalid inferences, missing hypotheses |
+| `AdversarialSkeptic` | strong | yes | Edge cases, brittle arguments, degenerate examples |
+| `NotationAuditor` | fast | no | Symbol consistency, undefined notation, broken references |
+| `ExpositionReferee` | fast | no | Readability, missing intuition, proof strategy clarity |
 
 Each reviewer returns structured JSON issues (`title`, `severity`, `type`, `location`,
 `quote`, `analysis`, `suggested_fix`, `confidence`). A final referee pass then synthesises
 all of them into one report. Non-mathematical sections (References, Bibliography,
 Acknowledgments) are skipped automatically.
+
+Extended thinking is enabled per reviewer, on the shape of the task rather than the tier.
+Deciding whether a proof step actually follows, or building a counterexample, is multi-step
+reasoning and benefits from it. Checking that a symbol was defined before use, or that a
+`\ref` resolves, is scanning and matching — it gains nothing from thinking and would cost
+tokens and latency for it. The final referee thinks too: it weighs and prioritises every
+finding across the whole paper, and runs only once per review.
 
 ## Requirements
 
@@ -117,7 +124,8 @@ llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/
 | `-y`, `--yes` | Skip the confirmation prompt. Required when stdin is not a terminal |
 | `--strong-model ID` | Model for the two deep reviewers and the final referee |
 | `--fast-model ID` | Model for the two lighter reviewers |
-| `--max-tokens N` | Output token limit per call (default 8192) |
+| `--max-tokens N` | Output token limit per call (default 16000, maximum 21333) |
+| `--effort LEVEL` | `low`, `medium`, `high`, `xhigh`, or `max` (default `high`) |
 | `--version` | Print the version |
 
 Exit codes: `0` success, `1` finished but some reviewer calls failed, `2` bad
@@ -130,21 +138,29 @@ the main file's directory and then the including file's. Commented-out reference
 ignored, cycles are broken, and a reference that can't be found is left alone with a
 warning rather than aborting the run.
 
-### Choosing models
+### Choosing models and effort
 
-Defaults are `claude-opus-4-7` for the strong tier and `claude-sonnet-4-6` for the fast
-tier. To use newer models:
+Defaults are `claude-opus-5` for the strong tier and `claude-sonnet-5` for the fast tier.
+To pin to older models:
 
 ```bash
-llm-reviewer paper.tex --strong-model claude-opus-5 --fast-model claude-sonnet-5 \
-  --max-tokens 32000
+llm-reviewer paper.tex --strong-model claude-opus-4-7 --fast-model claude-sonnet-4-6
 ```
 
-Raise `--max-tokens` when switching to a model where extended thinking is on by default:
-the limit covers thinking and response text together, so leaving it at 8192 can truncate a
-reviewer's JSON mid-object. Cost estimates are available for the models listed in
-`MODEL_PRICING`; any other ID still runs, but `--dry-run` will report token counts without
-a price.
+Cost estimates are available for the models listed in `MODEL_PRICING`; any other ID still
+runs, but `--dry-run` will report token counts without a price.
+
+`--effort` is the main cost and latency lever — it controls how much the models reason and
+spend overall. `high` is the default; drop to `medium` or `low` on a long paper or a quick
+pass, raise to `xhigh` or `max` on something that warrants it.
+
+Two constraints are worth knowing:
+
+- `--max-tokens` covers thinking *and* response text together, and is capped at 21333.
+  Above that the SDK requires streaming, which this pipeline does not use.
+- Some models reject a disabled-thinking request at `xhigh` or `max` effort. This can't
+  happen with the defaults, but `--fast-model claude-opus-5 --effort max` would hit it, so
+  the combination is refused up front with an explanation rather than failing per call.
 
 ### Resuming
 

@@ -11,14 +11,18 @@ from rich import print
 from . import __version__
 from .reviewer import (
     CREDENTIALS_HELP,
+    DEFAULT_EFFORT,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL_FAST,
     DEFAULT_MODEL_STRONG,
+    EFFORT_LEVELS,
+    MAX_NONSTREAMING_TOKENS,
     ConfigurationError,
     check_access,
     load_prompts,
     run_dry_run,
     run_pipeline,
+    validate_settings,
 )
 
 EXIT_OK = 0
@@ -72,9 +76,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_TOKENS,
         metavar="N",
         help=(
-            "Output token limit per call. On models where extended thinking is on by "
-            "default, this caps thinking and response text together, so raise it when "
-            f"switching to one (default: {DEFAULT_MAX_TOKENS})"
+            "Output token limit per call, covering thinking and response text together "
+            f"(default: {DEFAULT_MAX_TOKENS}, maximum {MAX_NONSTREAMING_TOKENS})"
+        ),
+    )
+    parser.add_argument(
+        "--effort",
+        default=DEFAULT_EFFORT,
+        choices=EFFORT_LEVELS,
+        help=(
+            "How hard the models work. The main cost and latency lever: lower spends "
+            f"fewer tokens, higher reasons more (default: {DEFAULT_EFFORT})"
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -84,12 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    if args.max_tokens < 1:
-        print("[red]--max-tokens must be a positive integer.[/red]")
-        return EXIT_CONFIG
-
     try:
         prompts = load_prompts(strong_model=args.strong_model, fast_model=args.fast_model)
+        validate_settings(prompts, max_tokens=args.max_tokens, effort=args.effort)
     except ConfigurationError as exc:
         print(f"[red]{exc}[/red]")
         return EXIT_CONFIG
@@ -106,7 +115,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.dry_run:
-            run_dry_run(client, args.input, prompts=prompts, max_tokens=args.max_tokens)
+            run_dry_run(
+                client,
+                args.input,
+                prompts=prompts,
+                max_tokens=args.max_tokens,
+                effort=args.effort,
+            )
             return EXIT_OK
 
         result = run_pipeline(
@@ -115,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             prompts=prompts,
             max_tokens=args.max_tokens,
+            effort=args.effort,
             assume_yes=args.yes,
         )
     except ConfigurationError as exc:

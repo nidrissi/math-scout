@@ -45,18 +45,20 @@ tests/test_reviewer.py          # pure-function tests; no network, no credential
 
 `cli.py` calls `check_access` first: a free `count_tokens` probe per distinct model that validates credentials and model IDs before anything is written or any money is spent.
 
-**Reviewers** (defined in `REVIEWER_SPECS`, resolved to models by `load_prompts`):
+**Reviewers** (defined in `REVIEWER_SPECS` as `ReviewerSpec(prompt, tier, thinking)`, resolved to `ReviewerConfig` by `load_prompts`):
 
-| Name | Tier | Focus |
-|---|---|---|
-| `FormalVerifier` | strong | Proof gaps, invalid inferences, hidden assumptions |
-| `AdversarialSkeptic` | strong | Edge cases, brittle arguments, suspicious steps |
-| `NotationAuditor` | fast | Notation consistency, undefined symbols, circular refs |
-| `ExpositionReferee` | fast | Readability, missing intuition, proof strategy clarity |
+| Name | Tier | Thinking | Focus |
+|---|---|---|---|
+| `FormalVerifier` | strong | adaptive | Proof gaps, invalid inferences, hidden assumptions |
+| `AdversarialSkeptic` | strong | adaptive | Edge cases, brittle arguments, suspicious steps |
+| `NotationAuditor` | fast | disabled | Notation consistency, undefined symbols, circular refs |
+| `ExpositionReferee` | fast | disabled | Readability, missing intuition, proof strategy clarity |
 
 Tiers map to concrete model IDs via `--strong-model` / `--fast-model`, defaulting to `DEFAULT_MODEL_STRONG` and `DEFAULT_MODEL_FAST`. All four reviewers return the same JSON schema: `{ issues: [ { title, severity, type, location, quote, analysis, suggested_fix, confidence } ] }`.
 
-Prompt caching is enabled on the global-context and reviewer-prompt system blocks, cutting repeated input token cost by ~90 % after the first call per reviewer. Note the minimum cacheable prefix is model-dependent (2048 tokens on Opus 4.7), so a short global context silently will not cache.
+Thinking is a property of the task, not the tier — the two happen to align because the tiers were chosen on the same reasoning-depth axis. `ReviewerConfig.thinking_config` turns the flag into the API parameter. The final referee always thinks. `--effort` applies uniformly to every call.
+
+Prompt caching is enabled on the global-context and reviewer-prompt system blocks, cutting repeated input token cost by ~90 % after the first call per reviewer. The minimum cacheable prefix is model-dependent (512 tokens on Opus 5, 1024 on Sonnet 5), so a very short global context silently will not cache.
 
 The final referee (`prompts/final_referee.md`) receives global context + all issues + full paper and produces a structured markdown report. When reviewer calls have failed, `format_coverage_note` prepends the gaps so the report states its own limits.
 
@@ -65,6 +67,7 @@ The final referee (`prompts/final_referee.md`) receives global context + all iss
 - **Per-chunk JSON is written before `issues.jsonl` is appended.** It is the resume marker; the ordering trades a rare lost-issue window for never duplicating issues on resume. See the comment in `run_pipeline`.
 - **Reviewer prompts keep their lanes.** Each prompt says what *not* to flag because another reviewer covers it. Widening one produces duplicates, not coverage.
 - **Errors that would recur identically** (`FATAL_API_ERRORS`) stop the run; everything else is recorded as a per-reviewer failure and the run continues.
+- **Every call is non-streaming**, so `max_tokens` must stay at or below `MAX_NONSTREAMING_TOKENS` (21333) — past that the SDK raises `ValueError` rather than making the request. `validate_settings` enforces it. Raising the cap means moving the pipeline to `messages.stream`.
 - **Tests must not need the network or credentials.** Stub the client, as `FakeClient` does.
 
 ## Dependencies
