@@ -128,8 +128,9 @@ llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/
 | `--effort LEVEL` | `low`, `medium`, `high`, `xhigh`, or `max` (default `high`) |
 | `--version` | Print the version |
 
-Exit codes: `0` success, `1` finished but some reviewer calls failed, `2` bad
-configuration (no credentials, unknown model, nothing to review, no confirmation).
+Exit codes: `0` success, or you declined at the confirmation prompt; `1` finished but
+some reviewer calls failed; `2` bad configuration — no credentials, an unknown or
+unusable model, nothing to review, or no terminal to confirm on without `--yes`.
 
 ### Multi-file papers
 
@@ -164,9 +165,19 @@ Two constraints are worth knowing:
 
 ### Resuming
 
-If a run is interrupted, re-running the same command picks up where it left off. Completed
-reviewer calls are detected from the per-chunk JSON files and skipped, so you only pay for
-what's missing.
+If a run is interrupted, re-running the same command picks up where it left off, so you
+only pay for what's missing. Progress is tracked in `review/state.json` against a hash of
+each section's text, which means:
+
+- **Editing the paper works.** Sections you changed are reviewed again; sections you
+  didn't are reused. Inserting or deleting a section doesn't disturb the others.
+- **Changing `--strong-model`, `--fast-model`, `--effort`, or `--max-tokens` is refused.**
+  The stored reviews were produced under different settings, and presenting them as the
+  output of the new ones would be a lie. Use a different `--output` or delete the
+  directory.
+
+Before it starts, the run prints how many calls it will make and how many it is reusing,
+so you see the cost implication before confirming.
 
 ## Output
 
@@ -177,8 +188,12 @@ Everything lands in the output directory (default `<input_dir>/review/`):
 | `final_report.md` | The final referee report — start here |
 | `chunks/NN_<section>.tex` | The exact LaTeX each reviewer saw |
 | `reviews/NN_<section>_<reviewer>.json` | Raw JSON from each reviewer per section |
-| `issues.jsonl` | Every issue, appended as it is found (one JSON object per line) |
-| `all_issues.json` | The same issues as a single JSON array |
+| `all_issues.json` | Every issue behind the current report, as a JSON array |
+| `issues.jsonl` | Append-only log of every issue ever produced here, one per line |
+| `state.json` | Resume bookkeeping — which reviews are complete, and under what settings |
+
+`all_issues.json` is the authoritative set for the current report. `issues.jsonl` is a
+log: if you edit the paper and re-run, it keeps the superseded findings too.
 
 If any reviewer call fails, the run says so, the final report is told to state its own
 coverage gaps, and the exit code is `1`. A failing run never silently presents partial
@@ -190,12 +205,17 @@ findings as complete.
   so far. A ten-section paper is over forty serial API calls, so expect it to be slow.
 - **`\section` only.** Documents structured with `\chapter`, or with no sectioning at all,
   produce nothing to review and exit with an error.
-- **Resume can lose issues.** If the process is killed between writing a reviewer's JSON
-  and appending to `issues.jsonl`, those issues are missing on resume. The alternative
-  ordering duplicates issues instead, which is worse.
 - **Reviewers only see one section at a time**, plus a shared global context (title,
   abstract, preamble, first 15 theorems/definitions). Errors that only appear when two
   distant sections are read together are likely to be missed.
+- **`\input` is confined to the document's own directory.** A reference pointing outside
+  it — an absolute path, or `../` climbing out — is refused with a warning rather than
+  inlined, since running this on a paper from someone else would otherwise let the file
+  read anything you can read and send it to the API.
+- **Prompt caching is not measured.** Repeated context should be served from cache after
+  the first call per reviewer, but the saving depends on the cache outliving the gap
+  between one reviewer's calls, which nobody here has verified against
+  `usage.cache_read_input_tokens`.
 
 ## Contributing
 
