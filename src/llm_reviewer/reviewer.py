@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -23,11 +24,7 @@ DEFAULT_MAX_TOKENS = 16_000
 
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_EFFORT = "high"
-
-# On these models an explicitly disabled thinking config is rejected at the top two
-# effort levels. Reviewers that run without thinking therefore cannot use them there.
-THINKING_DISABLED_EFFORT_CAPPED = frozenset({"claude-opus-5"})
-EFFORT_LEVELS_REJECTING_DISABLED_THINKING = frozenset({"xhigh", "max"})
+_ALL_EFFORTS = frozenset(EFFORT_LEVELS)
 
 # The two thinking configurations the pipeline uses, spelled out once.
 THINKING_ADAPTIVE: anthropic.types.ThinkingConfigParam = {"type": "adaptive"}
@@ -44,13 +41,16 @@ MODEL_PRICING = {
     "claude-opus-4-6": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
     "claude-sonnet-5": {"input": 3.0, "output": 15.0, "cache_read": 0.3},
     "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.3},
-    "claude-haiku-4-5": {"input": 1.0, "output": 5.0, "cache_read": 0.1},
 }
 
 ROOT = Path(__file__).parent.resolve()
 PROMPTS = ROOT / "prompts"
 
 FINAL_REFEREE_PROMPT = "final_referee.md"
+
+# Resume bookkeeping, written alongside the reviews.
+STATE_FILE = "state.json"
+STATE_VERSION = 1
 
 # Section titles (case-insensitive, LaTeX-stripped) that are skipped during review.
 _SKIP_SECTIONS = frozenset({"references", "bibliography", "acknowledgments", "acknowledgements"})
@@ -63,8 +63,8 @@ SECTION_RE = re.compile(r"\\section\*?\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}")
 # Matches LaTeX commands: \cmd{text} → text, or bare \cmd → "".
 _LATEX_CMD_RE = re.compile(r"\\[a-zA-Z]+\{([^{}]*)\}|\\[a-zA-Z]+")
 
-# Matches \input{...} and \include{...} file references.
-INPUT_RE = re.compile(r"\\(?:input|include)\s*\{([^{}]+)\}")
+# Matches \input{...} and \include{...}, plus TeX's brace-less \input foo form.
+INPUT_RE = re.compile(r"\\(?:input|include)\s*(?:\{([^{}]+)\}|\s([^\s{}\\%]+))")
 
 # How deep \input chains may nest before we stop expanding them.
 MAX_INPUT_DEPTH = 10
@@ -140,6 +140,31 @@ def attribute_issue(issue: Issue, reviewer_name: str) -> IssueWithReviewer:
 
 class Review(BaseModel):
     issues: list[Issue]
+
+
+@dataclass(frozen=True)
+class ModelSupport:
+    """What a model accepts of the request shape this pipeline always sends."""
+
+    efforts: frozenset[str]  # empty means the model rejects output_config.effort entirely
+    # Highest effort at which an explicitly disabled thinking config is still accepted.
+    # None means no restriction.
+    disabled_thinking_max_effort: str | None = None
+
+
+# Every call carries both an effort level and an explicit thinking config, so a model
+# that rejects either cannot be driven here. Models absent from this table are passed
+# through unchecked and the API reports any problem itself.
+MODEL_SUPPORT: dict[str, ModelSupport] = {
+    "claude-opus-5": ModelSupport(_ALL_EFFORTS, disabled_thinking_max_effort="high"),
+    "claude-opus-4-8": ModelSupport(_ALL_EFFORTS),
+    "claude-opus-4-7": ModelSupport(_ALL_EFFORTS),
+    "claude-opus-4-6": ModelSupport(_ALL_EFFORTS - {"xhigh"}),
+    "claude-sonnet-5": ModelSupport(_ALL_EFFORTS),
+    "claude-sonnet-4-6": ModelSupport(_ALL_EFFORTS - {"xhigh"}),
+    # Haiku 4.5 rejects output_config.effort and has no adaptive thinking mode.
+    "claude-haiku-4-5": ModelSupport(frozenset()),
+}
 
 
 @dataclass(frozen=True)
@@ -247,18 +272,34 @@ def validate_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> N
             f"--effort must be one of {', '.join(EFFORT_LEVELS)}; got {effort!r}."
         )
 
-    if effort in EFFORT_LEVELS_REJECTING_DISABLED_THINKING:
-        blocked = sorted(
-            reviewer.name
-            for reviewer in prompts.reviewers.values()
-            if not reviewer.thinking and reviewer.model in THINKING_DISABLED_EFFORT_CAPPED
-        )
-        if blocked:
+    for reviewer in sorted(prompts.reviewers.values(), key=lambda r: r.name):
+        support = MODEL_SUPPORT.get(reviewer.model)
+        if support is None:
+            continue
+
+        if not support.efforts:
             raise ConfigurationError(
-                f"{', '.join(blocked)} run without thinking, which "
-                f"{sorted(THINKING_DISABLED_EFFORT_CAPPED)[0]} rejects at --effort "
-                f"{effort}. Use --effort high or lower, or give those reviewers a "
-                "different --fast-model."
+                f"{reviewer.model} cannot be used here: it rejects the effort and "
+                "thinking settings this pipeline sends on every call. Choose another "
+                "model for it."
+            )
+        if effort not in support.efforts:
+            allowed = ", ".join(level for level in EFFORT_LEVELS if level in support.efforts)
+            raise ConfigurationError(
+                f"{reviewer.model} (used by {reviewer.name}) does not support --effort "
+                f"{effort}. It accepts: {allowed}."
+            )
+
+        cap = support.disabled_thinking_max_effort
+        if (
+            not reviewer.thinking
+            and cap is not None
+            and EFFORT_LEVELS.index(effort) > EFFORT_LEVELS.index(cap)
+        ):
+            raise ConfigurationError(
+                f"{reviewer.name} runs without thinking, which {reviewer.model} rejects "
+                f"above --effort {cap}. Use --effort {cap} or lower, or give it a "
+                "different model."
             )
 
 
@@ -270,9 +311,15 @@ def check_access(client: anthropic.Anthropic, models: list[str]) -> None:
     """
     for model in sorted(set(models)):
         try:
-            client.messages.count_tokens(
-                model=model,
-                messages=[{"role": "user", "content": "ping"}],
+            # Retry briefly so a rate limit or a momentary 5xx is a short wait rather
+            # than a failed pre-flight.
+            _call_with_retry(
+                lambda model=model: client.messages.count_tokens(
+                    model=model,
+                    messages=[{"role": "user", "content": "ping"}],
+                ),
+                retries=1,
+                base_delay=2.0,
             )
         except TypeError as exc:
             # The SDK raises a bare TypeError when it cannot resolve any credential.
@@ -292,6 +339,15 @@ def check_access(client: anthropic.Anthropic, models: list[str]) -> None:
             ) from exc
         except anthropic.APIConnectionError as exc:
             raise ConfigurationError(f"Cannot reach the Anthropic API: {exc}") from exc
+        except anthropic.RateLimitError as exc:
+            raise ConfigurationError(
+                f"Rate limited while checking access to {model!r}; try again shortly. {exc}"
+            ) from exc
+        except anthropic.APIStatusError as exc:
+            # Anything else the API rejected or failed on, including 5xx after retries.
+            raise ConfigurationError(
+                f"The API returned {exc.status_code} while checking access to {model!r}: {exc}"
+            ) from exc
 
 
 def _safe_filename(name: str) -> str:
@@ -376,18 +432,62 @@ def _split_comment(line: str) -> tuple[str, str]:
     return code, line[len(code) :]
 
 
+# Environments whose bodies are literal text, not markup: a \section inside one is
+# printed, not a heading. `comment` is not verbatim but is likewise not document text.
+_LITERAL_ENVS = ("verbatim", "Verbatim", "lstlisting", "minted", "comment", "alltt")
+_LITERAL_ENV_RE = re.compile(
+    r"\\begin\{(" + "|".join(_LITERAL_ENVS) + r")\*?\}.*?\\end\{\1\*?\}",
+    re.DOTALL,
+)
+
+
+def mask_non_content(tex: str) -> str:
+    """Blank out comments and literal environments, preserving every character position.
+
+    Section headings, abstracts, and theorem environments are matched against the result
+    so that commented-out or verbatim-quoted markup is not mistaken for real structure,
+    while offsets still index into the original string.
+    """
+    chars = list(tex)
+
+    def blank(start: int, end: int) -> None:
+        for i in range(start, end):
+            if chars[i] != "\n":  # keep line structure so line numbers still line up
+                chars[i] = " "
+
+    for match in _LITERAL_ENV_RE.finditer(tex):
+        blank(match.start(), match.end())
+
+    # Comments are masked after literal environments, so a % inside verbatim is already
+    # gone and cannot swallow the rest of that line.
+    offset = 0
+    for line in "".join(chars).splitlines(keepends=True):
+        code = strip_comment(line)
+        blank(offset + len(code), offset + len(line.rstrip("\n")))
+        offset += len(line)
+
+    return "".join(chars)
+
+
 def _resolve_reference(reference: str, search_dirs: list[Path]) -> Path | None:
     """Locate the file an \\input/\\include reference points at, trying .tex if bare."""
     reference = reference.strip()
     candidates = [reference]
-    if not Path(reference).suffix:
+    if not reference.endswith(".tex"):
         candidates.append(reference + ".tex")
     for directory in search_dirs:
         for candidate in candidates:
+            # Path("/a") / "/etc/passwd" is "/etc/passwd", so an absolute reference
+            # escapes the join entirely. Callers must confine the result themselves.
             path = directory / candidate
             if path.is_file():
                 return path
     return None
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """Whether *path* lies inside the *root* directory tree, following symlinks."""
+    return path.resolve().is_relative_to(root.resolve())
 
 
 def resolve_inputs(
@@ -399,15 +499,21 @@ def resolve_inputs(
     """Read a .tex file and inline every \\input{} and \\include{} it references.
 
     References resolve relative to *root* (the main document's directory, mirroring how
-    LaTeX searches) and then relative to the including file. Commented-out references are
-    ignored, cycles are broken, and a reference that cannot be found is left in place with
-    a warning rather than aborting the run.
+    LaTeX searches) and then relative to the including file, and may not escape *root*.
+    Commented-out references are ignored, cycles are broken, and a reference that cannot
+    be found is left in place with a warning rather than aborting the run.
     """
     path = Path(path)
     root = path.parent if root is None else Path(root)
     seen = frozenset() if _seen is None else _seen
 
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigurationError(
+            f"{path} is not valid UTF-8 ({exc.reason} at byte {exc.start}). Older LaTeX "
+            "sources are often Latin-1; convert with `iconv -f latin1 -t utf-8`."
+        ) from exc
     if _depth >= MAX_INPUT_DEPTH:
         print(
             f"[yellow]Warning: \\input nesting deeper than {MAX_INPUT_DEPTH} at {path}; "
@@ -419,12 +525,20 @@ def resolve_inputs(
     search_dirs = [root, path.parent]
 
     def expand(match: re.Match[str]) -> str:
-        reference = match.group(1)
+        reference = match.group(1) or match.group(2)
         target = _resolve_reference(reference, search_dirs)
         if target is None:
             print(
                 f"[yellow]Warning: cannot find {reference!r} referenced from {path}; "
                 "leaving the reference unexpanded.[/yellow]"
+            )
+            return match.group(0)
+        if not _is_within(target, root):
+            # Papers arrive from other people. Without this, \input{/etc/passwd} would
+            # read any file the user can read and ship it to the API and into the report.
+            print(
+                f"[yellow]Refusing to inline {reference!r} from {path}: it resolves to "
+                f"{target.resolve()}, outside {root.resolve()}.[/yellow]"
             )
             return match.group(0)
         if target.resolve() in seen:
@@ -469,9 +583,9 @@ TITLE_RE = re.compile(
 BEGIN_DOCUMENT_RE = re.compile(r"\\begin\{document\}")
 
 
-def _front_matter(tex: str, first_section_start: int) -> str | None:
+def _front_matter(tex: str, masked: str, first_section_start: int) -> str | None:
     """Return the body text before the first \\section, if it holds enough real prose."""
-    match = BEGIN_DOCUMENT_RE.search(tex)
+    match = BEGIN_DOCUMENT_RE.search(masked)
     body_start = match.end() if match else 0
     if body_start >= first_section_start:
         return None
@@ -490,13 +604,16 @@ def chunk_by_section(tex: str) -> list[Chunk]:
     """Split a LaTeX string into Chunks at each \\section boundary.
 
     Non-mathematical sections are skipped, and body text preceding the first section is
-    kept as a leading chunk when it holds enough prose to be worth reviewing.
+    kept as a leading chunk when it holds enough prose to be worth reviewing. Headings
+    are matched against the comment- and verbatim-masked text, so a commented-out
+    \\section neither invents a chunk nor truncates the one it sits in.
     """
-    matches = list(SECTION_RE.finditer(tex))
+    masked = mask_non_content(tex)
+    matches = list(SECTION_RE.finditer(masked))
     chunks = []
 
     if matches:
-        front = _front_matter(tex, matches[0].start())
+        front = _front_matter(tex, masked, matches[0].start())
         if front is not None:
             chunks.append(Chunk(name=FRONT_MATTER_NAME, content=front))
 
@@ -513,33 +630,38 @@ def chunk_by_section(tex: str) -> list[Chunk]:
 
 
 def extract_global_context(tex: str) -> str:
-    """Extract the abstract, preamble, and up to 15 theorems/definitions as shared context."""
-    parts = []
+    """Extract the abstract, preamble, and up to 15 theorems/definitions as shared context.
 
-    title_match = TITLE_RE.search(tex)
+    Everything is located in the masked text and sliced from the original, so a
+    commented-out title or a theorem quoted inside verbatim is not picked up.
+    """
+    parts = []
+    masked = mask_non_content(tex)
+
+    title_match = TITLE_RE.search(masked)
     if title_match:
-        title = title_match.group(1).strip()
+        title = tex[title_match.start(1) : title_match.end(1)].strip()
         if title:
             parts.insert(0, f"# PAPER TITLE\n\n{title}")
 
-    abstract_match = ABSTRACT_RE.search(tex)
+    abstract_match = ABSTRACT_RE.search(masked)
     if abstract_match:
         parts.append("# ABSTRACT\n")
-        parts.append(abstract_match.group(1))
+        parts.append(tex[abstract_match.start(1) : abstract_match.end(1)])
 
-    preamble_match = PREAMBLE_RE.search(tex)
+    preamble_match = PREAMBLE_RE.search(masked)
     if preamble_match:
-        preamble = preamble_match.group(1).strip()
+        preamble = tex[preamble_match.start(1) : preamble_match.end(1)].strip()
         if preamble:
             parts.append("\n# PREAMBLE\n")
             parts.append(preamble)
 
     theorem_parts = []
-    for i, match in enumerate(THEOREM_DEFINITION_RE.finditer(tex)):
+    for i, match in enumerate(THEOREM_DEFINITION_RE.finditer(masked)):
         if i >= 15:
             break
         env_type = match.group(1).capitalize()
-        content = match.group(2).strip()
+        content = tex[match.start(2) : match.end(2)].strip()
         theorem_parts.append(f"## {env_type} {i + 1}\n\n{content}")
 
     if theorem_parts:
@@ -764,7 +886,7 @@ def run_final_referee(
     issues: list[IssueWithReviewer],
     global_context: str,
     system_prompt: str,
-    model: str = DEFAULT_MODEL_STRONG,
+    model: str,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
     coverage_note: str = "",
@@ -807,6 +929,119 @@ def _prepare(tex_path: str) -> tuple[str, list[Chunk], str]:
     return tex, chunks, global_context
 
 
+def chunk_key(chunk: Chunk) -> str:
+    """A stable identity for a chunk, derived from its title and its text.
+
+    Resume decisions hang off this rather than off a filename. Filenames carry the
+    chunk's position so output sorts in document order, which makes them change whenever
+    a section is inserted or removed; the key does not, and it also changes exactly when
+    the text does, so edited sections are re-reviewed and untouched ones are not.
+    """
+    digest = hashlib.sha256()
+    digest.update(chunk.name.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(chunk.content.encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def run_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> dict:
+    """The knobs that change what a reviewer would say, recorded so resume can compare."""
+    return {
+        "models": {name: r.model for name, r in sorted(prompts.reviewers.items())},
+        "max_tokens": max_tokens,
+        "effort": effort,
+    }
+
+
+@dataclass
+class ResumeState:
+    """Which (chunk, reviewer) pairs are already done, and under what settings."""
+
+    settings: dict
+    completed: dict[str, dict[str, str]] = field(default_factory=dict)
+
+    def is_done(self, key: str, reviewer: str) -> bool:
+        return reviewer in self.completed.get(key, {})
+
+    def review_file(self, key: str, reviewer: str) -> str:
+        return self.completed[key][reviewer]
+
+    def mark(self, key: str, reviewer: str, filename: str) -> None:
+        self.completed.setdefault(key, {})[reviewer] = filename
+
+    def prune(self, live_keys: set[str]) -> None:
+        """Forget chunks that are no longer in the document."""
+        for key in set(self.completed) - live_keys:
+            del self.completed[key]
+
+    def save(self, path: Path) -> None:
+        path.write_text(
+            json.dumps(
+                {"version": STATE_VERSION, "settings": self.settings, "completed": self.completed},
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+
+def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
+    """Load prior progress for this output directory, or start fresh.
+
+    Refuses rather than guesses when the previous run used different models, effort, or
+    token limits: its findings describe a different pipeline, and silently reusing them
+    would present stale output as current.
+    """
+    state_path = output_dir / STATE_FILE
+    reviews_dir = output_dir / "reviews"
+
+    if not state_path.exists():
+        if reviews_dir.is_dir() and any(reviews_dir.glob("*.json")):
+            raise ConfigurationError(
+                f"{reviews_dir} holds reviews but {state_path} is missing, so there is no "
+                "record of what produced them. Delete the output directory or pass a "
+                "different --output."
+            )
+        return ResumeState(settings=settings)
+
+    try:
+        stored = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigurationError(f"Cannot read {state_path}: {exc}") from exc
+
+    if stored.get("version") != STATE_VERSION:
+        raise ConfigurationError(
+            f"{state_path} was written by a different version of llm-reviewer. Delete the "
+            "output directory or pass a different --output."
+        )
+
+    if stored.get("settings") != settings:
+        changed = _describe_settings_change(stored.get("settings") or {}, settings)
+        raise ConfigurationError(
+            f"{output_dir} holds a run made with different settings ({changed}). Reusing "
+            "those reviews would report findings that the current settings did not "
+            "produce. Delete the output directory or pass a different --output."
+        )
+
+    return ResumeState(settings=settings, completed=stored.get("completed") or {})
+
+
+def _describe_settings_change(old: dict, new: dict) -> str:
+    differences = [
+        f"{name}: {old.get(name)!r} -> {new.get(name)!r}"
+        for name in sorted(set(old) | set(new))
+        if old.get(name) != new.get(name)
+    ]
+    return "; ".join(differences) or "unknown difference"
+
+
+def _load_review(path: Path) -> Review | None:
+    """Read a stored reviewer result, treating anything unreadable as not done."""
+    try:
+        return Review.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 def _confirm(assume_yes: bool) -> bool:
     """Ask the user to confirm the run, or fail loudly when there is nobody to ask."""
     if assume_yes:
@@ -832,20 +1067,28 @@ def run_pipeline(
     """Run the full multi-reviewer pipeline on a .tex file and write all outputs to *output_dir*."""
     prompts = load_prompts() if prompts is None else prompts
 
+    # Validate the input before creating anything, so a typo'd path leaves no litter.
+    tex, chunks, global_context = _prepare(tex_path)
+
     output_dir = Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
     reviews_dir = output_dir / "reviews"
     issues_file = output_dir / "issues.jsonl"
     chunks_dir = output_dir / "chunks"
 
+    settings = run_settings(prompts, max_tokens=max_tokens, effort=effort)
+    state = load_resume_state(output_dir, settings)
+    keys = [chunk_key(chunk) for chunk in chunks]
+    state.prune(set(keys))
+
     output_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(exist_ok=True)
     chunks_dir.mkdir(exist_ok=True)
-    tex, chunks, global_context = _prepare(tex_path)
 
     result = PipelineResult(output_dir=output_dir)
 
-    for index, chunk in enumerate(chunks):
-        chunk_path = chunks_dir / f"{chunk_stem(index, chunk)}.tex"
+    stems = [chunk_stem(index, chunk) for index, chunk in enumerate(chunks)]
+    for stem, chunk in zip(stems, chunks, strict=True):
+        chunk_path = chunks_dir / f"{stem}.tex"
         chunk_path.write_text(chunk.content, encoding="utf-8")
         print(
             f"[green]Extracted chunk:[/green] {chunk.name} "
@@ -859,6 +1102,13 @@ def run_pipeline(
         f"[gray]{preview}{ellipsis}[/gray]"
     )
 
+    done = sum(state.is_done(key, name) for key in keys for name in prompts.reviewers)
+    pending = len(keys) * len(prompts.reviewers) - done
+    plan = f"[bold]{pending} reviewer call(s) to make"
+    if done:
+        plan += f", {done} already complete and reused"
+    print(plan + ", then one final referee call.[/bold]")
+
     if not _confirm(assume_yes):
         print("[red]Aborting review.[/red]")
         result.aborted = True
@@ -866,20 +1116,27 @@ def run_pipeline(
 
     print("[bold blue]Starting multi-reviewer analysis...[/bold blue]")
 
-    all_issues: list[IssueWithReviewer] = load_known_issues(issues_file)
-    for index, chunk in enumerate(chunks):
+    # Rebuilt from the stored reviews rather than from issues.jsonl, so a run that was
+    # interrupted between writing a review and appending to the log loses nothing.
+    all_issues: list[IssueWithReviewer] = []
+    for key, stem, chunk in zip(keys, stems, chunks, strict=True):
         if result.fatal_error is not None:
             break
         print(f"[bold blue]Reviewing:[/bold blue] {chunk.name}")
         known_issues = summarize_known_issues(all_issues)
-        stem = chunk_stem(index, chunk)
 
         for reviewer_name, reviewer in prompts.reviewers.items():
             out_path = reviews_dir / f"{stem}_{reviewer_name}.json"
 
-            if out_path.exists():
-                print(f"  -> {reviewer_name} [yellow](resuming from disk)[/yellow]")
-                continue
+            if state.is_done(key, reviewer_name):
+                stored = _load_review(reviews_dir / state.review_file(key, reviewer_name))
+                if stored is not None:
+                    print(f"  -> {reviewer_name} [yellow](reusing stored review)[/yellow]")
+                    all_issues.extend(attribute_issue(iss, reviewer_name) for iss in stored.issues)
+                    continue
+                print(
+                    f"  -> {reviewer_name} [yellow](stored review unreadable, re-running)[/yellow]"
+                )
 
             print(f"  -> {reviewer_name}")
 
@@ -913,13 +1170,14 @@ def run_pipeline(
 
             attributed_issues = [attribute_issue(iss, reviewer_name) for iss in review.issues]
 
-            # Write per-chunk JSON first so it acts as the authoritative resume marker.
-            # If the process dies between here and append_issues, the JSON exists but
-            # issues.jsonl is incomplete — on resume the JSON check prevents re-running
-            # the reviewer, yet those issues were never appended. This is preferable to
-            # the reverse order, which causes duplicate issues on resume.
+            # The review file holds the findings; state.json records that it is complete.
+            # Writing the review first means a crash in between costs one repeated call
+            # and never loses an issue. issues.jsonl is an append-only log that may
+            # therefore contain superseded entries; all_issues.json is the current truth.
             out_path.write_text(review.model_dump_json(indent=2), encoding="utf-8")
             append_issues(attributed_issues, issues_file)
+            state.mark(key, reviewer_name, out_path.name)
+            state.save(output_dir / STATE_FILE)
             all_issues.extend(attributed_issues)
 
     result.issues = all_issues
@@ -987,7 +1245,8 @@ def run_dry_run(
     tex_path: str,
     prompts: LoadedPrompts | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    effort: str = DEFAULT_EFFORT,  # noqa: ARG001 - does not affect input token counts
+    # Accepted for symmetry with run_pipeline; effort does not change input token counts.
+    effort: str = DEFAULT_EFFORT,
 ) -> None:
     """Count input tokens and estimate cost without sending any generation requests."""
     prompts = load_prompts() if prompts is None else prompts

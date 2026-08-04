@@ -19,7 +19,8 @@ uv run ruff format
 uv run pytest
 ```
 
-CI runs exactly these on Python 3.11 and 3.12.
+CI runs the same checks on Python 3.11 and 3.12, except that it verifies formatting with
+`ruff format --check` rather than rewriting files.
 
 ## Tests
 
