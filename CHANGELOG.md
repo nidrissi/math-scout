@@ -18,9 +18,16 @@ First public release. Everything before this lived only in the author's working 
   warned about rather than fatal.
 - `--yes/-y` for non-interactive runs, plus a clear error instead of an `EOFError`
   traceback when stdin is not a terminal and the flag is absent.
-- `--strong-model`, `--fast-model`, and `--max-tokens` flags. Cost estimation covers the
-  current Opus, Sonnet, and Haiku models; unknown model IDs still run, and `--dry-run`
-  reports their token counts without a price.
+- `--strong-model`, `--fast-model`, `--max-tokens`, and `--effort` flags. Cost estimation
+  covers the current Opus, Sonnet, and Haiku models; unknown model IDs still run, and
+  `--dry-run` reports their token counts without a price.
+- Per-reviewer extended thinking, chosen on the shape of each task: `FormalVerifier`,
+  `AdversarialSkeptic`, and the final referee think; `NotationAuditor` and
+  `ExpositionReferee` do not, because symbol and reference checking is scanning rather
+  than reasoning.
+- Invalid invocations are refused before any request: `--max-tokens` above the
+  non-streaming ceiling of 21333, and a disabled-thinking reviewer on a model that
+  rejects that at `xhigh` or `max` effort.
 - A free pre-flight check that verifies credentials and every model ID before the run
   writes anything or asks for confirmation.
 - Failure reporting: reviewer failures are collected, summarised, passed to the final
@@ -32,6 +39,16 @@ First public release. Everything before this lived only in the author's working 
 
 ### Changed
 
+- Default models are now `claude-opus-5` and `claude-sonnet-5`. Opus 5 costs the same as
+  Opus 4.7 and lowers the minimum cacheable prompt from 2048 to 512 tokens, so short
+  global contexts now benefit from prompt caching. Sonnet 5 uses a newer tokenizer that
+  produces roughly 30% more tokens for the same text, so the two fast reviewers cost
+  proportionally more per run at the same per-token rate.
+- `--max-tokens` defaults to 16000, up from 8192, because it now covers extended thinking
+  and response text together. It is capped at 21333, above which the SDK requires
+  streaming.
+- A reviewer that runs out of tokens mid-JSON now says so and names the fix, instead of
+  reporting a generic "no parsed output".
 - Credentials resolve through the Anthropic SDK, so an `ant auth login` profile works in
   addition to `ANTHROPIC_API_KEY`.
 - Chunk output filenames are prefixed with the section index, so two sections whose titles

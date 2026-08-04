@@ -12,12 +12,31 @@ import anthropic
 from pydantic import BaseModel
 from rich import print
 
-DEFAULT_MODEL_STRONG = "claude-opus-4-7"
-DEFAULT_MODEL_FAST = "claude-sonnet-4-6"
-DEFAULT_MAX_TOKENS = 8192
+DEFAULT_MODEL_STRONG = "claude-opus-5"
+DEFAULT_MODEL_FAST = "claude-sonnet-5"
+
+# The SDK refuses a non-streaming request whose estimated duration exceeds ten minutes,
+# which works out at max_tokens > 21_333 (see _calculate_nonstreaming_timeout in
+# anthropic/_base_client.py). Staying under that keeps every call non-streaming.
+MAX_NONSTREAMING_TOKENS = 21_333
+DEFAULT_MAX_TOKENS = 16_000
+
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_EFFORT = "high"
+
+# On these models an explicitly disabled thinking config is rejected at the top two
+# effort levels. Reviewers that run without thinking therefore cannot use them there.
+THINKING_DISABLED_EFFORT_CAPPED = frozenset({"claude-opus-5"})
+EFFORT_LEVELS_REJECTING_DISABLED_THINKING = frozenset({"xhigh", "max"})
+
+# The two thinking configurations the pipeline uses, spelled out once.
+THINKING_ADAPTIVE: anthropic.types.ThinkingConfigParam = {"type": "adaptive"}
+THINKING_DISABLED: anthropic.types.ThinkingConfigParam = {"type": "disabled"}
 
 # USD per million tokens. Cache reads are 0.1x the input rate.
 # Models absent from this table still work; only cost estimation is unavailable.
+# Sonnet 5 is listed at its standard rate; an introductory $2/$10 runs to 2026-08-31,
+# so estimates are deliberately conservative until then.
 MODEL_PRICING = {
     "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
     "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
@@ -124,12 +143,26 @@ class Review(BaseModel):
 
 
 @dataclass(frozen=True)
+class ReviewerSpec:
+    """Static description of a reviewer, independent of which models are in use."""
+
+    prompt: str  # filename under prompts/
+    tier: str  # "strong" or "fast"
+    thinking: bool  # whether this reviewer's task benefits from extended thinking
+
+
+@dataclass(frozen=True)
 class ReviewerConfig:
     """A reviewer resolved against a concrete model, with its prompt text loaded."""
 
     name: str
     model: str
     prompt_text: str
+    thinking: bool
+
+    @property
+    def thinking_config(self) -> anthropic.types.ThinkingConfigParam:
+        return THINKING_ADAPTIVE if self.thinking else THINKING_DISABLED
 
 
 @dataclass(frozen=True)
@@ -160,13 +193,17 @@ class PipelineResult:
     fatal_error: str | None = None
 
 
-# Maps reviewer name → (prompt filename under prompts/, model tier).
 # The tier is resolved to a concrete model ID by load_prompts().
-REVIEWER_SPECS: dict[str, tuple[str, str]] = {
-    "FormalVerifier": ("formal_verifier.md", "strong"),
-    "AdversarialSkeptic": ("adversarial_skeptic.md", "strong"),
-    "NotationAuditor": ("notation_auditor.md", "fast"),
-    "ExpositionReferee": ("exposition_referee.md", "fast"),
+#
+# Thinking is decided per reviewer, on the shape of its task rather than its tier:
+# judging whether a proof step follows, or building a counterexample, is multi-step
+# reasoning; checking that a symbol was defined or a \ref resolves is scanning and
+# matching, and gains nothing from thinking but costs tokens and latency for it.
+REVIEWER_SPECS: dict[str, ReviewerSpec] = {
+    "FormalVerifier": ReviewerSpec("formal_verifier.md", "strong", thinking=True),
+    "AdversarialSkeptic": ReviewerSpec("adversarial_skeptic.md", "strong", thinking=True),
+    "NotationAuditor": ReviewerSpec("notation_auditor.md", "fast", thinking=False),
+    "ExpositionReferee": ReviewerSpec("exposition_referee.md", "fast", thinking=False),
 }
 
 
@@ -185,10 +222,44 @@ def load_prompts(
     """Read every prompt file up front so a missing one fails before any API spending."""
     models = {"strong": strong_model, "fast": fast_model}
     reviewers = {
-        name: ReviewerConfig(name=name, model=models[tier], prompt_text=_read_prompt(filename))
-        for name, (filename, tier) in REVIEWER_SPECS.items()
+        name: ReviewerConfig(
+            name=name,
+            model=models[spec.tier],
+            prompt_text=_read_prompt(spec.prompt),
+            thinking=spec.thinking,
+        )
+        for name, spec in REVIEWER_SPECS.items()
     }
     return LoadedPrompts(reviewers=reviewers, final_referee=_read_prompt(FINAL_REFEREE_PROMPT))
+
+
+def validate_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> None:
+    """Reject invocations the API would refuse, before any request is made."""
+    if max_tokens < 1:
+        raise ConfigurationError("--max-tokens must be a positive integer.")
+    if max_tokens > MAX_NONSTREAMING_TOKENS:
+        raise ConfigurationError(
+            f"--max-tokens is capped at {MAX_NONSTREAMING_TOKENS:,}: above that the SDK "
+            "requires streaming, which this pipeline does not use."
+        )
+    if effort not in EFFORT_LEVELS:
+        raise ConfigurationError(
+            f"--effort must be one of {', '.join(EFFORT_LEVELS)}; got {effort!r}."
+        )
+
+    if effort in EFFORT_LEVELS_REJECTING_DISABLED_THINKING:
+        blocked = sorted(
+            reviewer.name
+            for reviewer in prompts.reviewers.values()
+            if not reviewer.thinking and reviewer.model in THINKING_DISABLED_EFFORT_CAPPED
+        )
+        if blocked:
+            raise ConfigurationError(
+                f"{', '.join(blocked)} run without thinking, which "
+                f"{sorted(THINKING_DISABLED_EFFORT_CAPPED)[0]} rejects at --effort "
+                f"{effort}. Use --effort high or lower, or give those reviewers a "
+                "different --fast-model."
+            )
 
 
 def check_access(client: anthropic.Anthropic, models: list[str]) -> None:
@@ -242,6 +313,9 @@ def extract_text(response) -> str:
     for block in response.content:
         if block.type == "text":
             texts.append(block.text)
+        elif block.type in ("thinking", "redacted_thinking"):
+            # Expected whenever thinking is on; the report itself is in the text blocks.
+            continue
         else:
             print(f"[yellow]Unexpected content block type {block.type!r}: {block}[/yellow]")
     if not texts:
@@ -576,12 +650,17 @@ def _api_call_with_schema(
     known_issues: str,
     to_review: str,
     max_tokens: int,
+    thinking: anthropic.types.ThinkingConfigParam,
+    effort: str,
 ):
+    # The SDK merges output_format into output_config, so passing both is supported.
     return client.messages.parse(
         model=model,
         max_tokens=max_tokens,
         system=_build_system(global_context, system_prompt),
         messages=_build_messages(known_issues, to_review),
+        thinking=thinking,
+        output_config={"effort": effort},
         output_format=Review,
     )
 
@@ -594,12 +673,16 @@ def _api_call(
     known_issues: str,
     to_review: str,
     max_tokens: int,
+    thinking: anthropic.types.ThinkingConfigParam,
+    effort: str,
 ):
     return client.messages.create(
         model=model,
         max_tokens=max_tokens,
         system=_build_system(global_context, system_prompt),
         messages=_build_messages(known_issues, to_review),
+        thinking=thinking,
+        output_config={"effort": effort},
     )
 
 
@@ -635,6 +718,7 @@ def call_reviewer(
     global_context: str,
     known_issues: str,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    effort: str = DEFAULT_EFFORT,
 ):
     """Send a section chunk to a reviewer and return its parsed JSON issue report."""
     response = _call_with_retry(
@@ -646,10 +730,20 @@ def call_reviewer(
             known_issues=known_issues,
             to_review=_format_section(chunk),
             max_tokens=max_tokens,
+            thinking=reviewer.thinking_config,
+            effort=effort,
         )
     )
 
     if not response or not response.parsed_output:
+        # Thinking shares the max_tokens budget with the response, so a truncated reply
+        # is a realistic failure rather than a theoretical one. Say which it was.
+        if response is not None and response.stop_reason == "max_tokens":
+            raise ValueError(
+                f"{reviewer.name} hit the {max_tokens:,}-token limit on section "
+                f"'{chunk.name}' before finishing its JSON. Raise --max-tokens (up to "
+                f"{MAX_NONSTREAMING_TOKENS:,}) or lower --effort."
+            )
         raise ValueError(
             f"No parsed output from reviewer {reviewer.name} on section '{chunk.name}'"
         )
@@ -672,9 +766,12 @@ def run_final_referee(
     system_prompt: str,
     model: str = DEFAULT_MODEL_STRONG,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    effort: str = DEFAULT_EFFORT,
     coverage_note: str = "",
 ) -> str:
     """Synthesize a markdown referee report from the paper and the collected issues."""
+    # This pass weighs and prioritises every finding across the whole paper, so it
+    # thinks — and it runs once per review, so the extra cost is marginal.
     response = _call_with_retry(
         lambda: _api_call(
             client=client,
@@ -684,6 +781,8 @@ def run_final_referee(
             known_issues=coverage_note + format_all_issues(issues),
             to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
             max_tokens=max_tokens,
+            thinking=THINKING_ADAPTIVE,
+            effort=effort,
         )
     )
 
@@ -727,6 +826,7 @@ def run_pipeline(
     output_dir: Path | str | None = None,
     prompts: LoadedPrompts | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    effort: str = DEFAULT_EFFORT,
     assume_yes: bool = False,
 ) -> PipelineResult:
     """Run the full multi-reviewer pipeline on a .tex file and write all outputs to *output_dir*."""
@@ -791,6 +891,7 @@ def run_pipeline(
                     global_context=global_context,
                     known_issues=known_issues,
                     max_tokens=max_tokens,
+                    effort=effort,
                 )
             except FATAL_API_ERRORS as exc:
                 # Credentials or the model itself are wrong, so every remaining call
@@ -857,6 +958,7 @@ def run_pipeline(
             system_prompt=prompts.final_referee,
             model=prompts.reviewers["FormalVerifier"].model,
             max_tokens=max_tokens,
+            effort=effort,
             coverage_note=format_coverage_note(result.failures),
         )
     except Exception as exc:
@@ -885,6 +987,7 @@ def run_dry_run(
     tex_path: str,
     prompts: LoadedPrompts | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    effort: str = DEFAULT_EFFORT,  # noqa: ARG001 - does not affect input token counts
 ) -> None:
     """Count input tokens and estimate cost without sending any generation requests."""
     prompts = load_prompts() if prompts is None else prompts
@@ -977,6 +1080,8 @@ def run_dry_run(
     print(f"[bold green]{label}: ${input_cost:.2f}[/bold green]")
     print(
         f"[bold green]Max output cost: ${max_output_cost:.2f}[/bold green]  "
-        f"(if all {sum(call_counts.values())} calls use {max_tokens:,} output tokens)"
+        f"(a ceiling nobody reaches: it assumes all {sum(call_counts.values())} calls "
+        f"emit the full {max_tokens:,} output tokens, and two of the four reviewers "
+        "run without thinking)"
     )
     print(f"[bold green]Max total cost: ${input_cost + max_output_cost:.2f}[/bold green]")
