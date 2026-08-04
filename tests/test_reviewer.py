@@ -11,12 +11,22 @@ import httpx
 import pytest
 
 from llm_reviewer.reviewer import (
+    DEFAULT_EFFORT,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_MODEL_FAST,
+    DEFAULT_MODEL_STRONG,
+    EFFORT_LEVELS,
     FRONT_MATTER_NAME,
+    MAX_NONSTREAMING_TOKENS,
+    MODEL_PRICING,
+    REVIEWER_SPECS,
     Chunk,
     ConfigurationError,
     IssueWithReviewer,
+    Review,
     SeverityLevel,
     _safe_filename,
+    call_reviewer,
     check_access,
     chunk_by_section,
     chunk_stem,
@@ -27,6 +37,7 @@ from llm_reviewer.reviewer import (
     resolve_inputs,
     strip_comment,
     summarize_known_issues,
+    validate_settings,
 )
 from llm_reviewer.reviewer import (
     ReviewerFailure as Failure,
@@ -290,12 +301,20 @@ def test_format_coverage_note_names_every_failure():
 # ----------------------------------------------------------------------- access check
 
 
-class FakeClient:
-    """Stands in for anthropic.Anthropic, recording which models were probed."""
+class FakeParsed:
+    def __init__(self, parsed_output, stop_reason="end_turn"):
+        self.parsed_output = parsed_output
+        self.stop_reason = stop_reason
 
-    def __init__(self, error: Exception | None = None):
+
+class FakeClient:
+    """Stands in for anthropic.Anthropic, recording what the pipeline sent."""
+
+    def __init__(self, error: Exception | None = None, stop_reason: str = "end_turn"):
         self.error = error
+        self.stop_reason = stop_reason
         self.models_probed: list[str] = []
+        self.parse_calls: list[dict] = []
         self.messages = self
 
     def count_tokens(self, model, messages):  # noqa: ARG002 - mirrors the SDK signature
@@ -303,6 +322,11 @@ class FakeClient:
         if self.error is not None:
             raise self.error
         return object()
+
+    def parse(self, **kwargs):
+        self.parse_calls.append(kwargs)
+        parsed = None if self.stop_reason == "max_tokens" else Review(issues=[])
+        return FakeParsed(parsed, stop_reason=self.stop_reason)
 
 
 def api_error(cls: type, status: int, message: str = "nope"):
@@ -364,3 +388,107 @@ def test_load_prompts_applies_the_requested_models():
     assert prompts.reviewers["AdversarialSkeptic"].model == "strong-x"
     assert prompts.reviewers["NotationAuditor"].model == "fast-y"
     assert prompts.reviewers["ExpositionReferee"].model == "fast-y"
+
+
+# --------------------------------------------------------------------------- defaults
+
+
+def test_default_models_are_priced():
+    """Cost estimation silently degrades if a default model has no pricing entry."""
+    assert DEFAULT_MODEL_STRONG in MODEL_PRICING
+    assert DEFAULT_MODEL_FAST in MODEL_PRICING
+
+
+def test_default_max_tokens_stays_under_the_non_streaming_ceiling():
+    """Above this the SDK raises ValueError instead of making the call."""
+    assert 0 < DEFAULT_MAX_TOKENS <= MAX_NONSTREAMING_TOKENS
+
+
+def test_default_effort_is_a_valid_level():
+    assert DEFAULT_EFFORT in EFFORT_LEVELS
+
+
+# --------------------------------------------------------------------------- thinking
+
+
+def test_thinking_is_enabled_for_the_deductive_reviewers_only():
+    thinking = {name: spec.thinking for name, spec in REVIEWER_SPECS.items()}
+    assert thinking == {
+        "FormalVerifier": True,
+        "AdversarialSkeptic": True,
+        "NotationAuditor": False,
+        "ExpositionReferee": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("reviewer_name", "expected"),
+    [("FormalVerifier", "adaptive"), ("NotationAuditor", "disabled")],
+)
+def test_call_reviewer_sends_the_reviewer_s_thinking_config(reviewer_name, expected):
+    client = FakeClient()
+    prompts = load_prompts()
+    call_reviewer(
+        client=client,
+        reviewer=prompts.reviewers[reviewer_name],
+        chunk=Chunk("Intro", "body"),
+        global_context="ctx",
+        known_issues="none",
+        max_tokens=1234,
+        effort="medium",
+    )
+    (sent,) = client.parse_calls
+    assert sent["thinking"] == {"type": expected}
+    assert sent["output_config"] == {"effort": "medium"}
+    assert sent["max_tokens"] == 1234
+
+
+def test_call_reviewer_names_truncation_as_the_cause():
+    client = FakeClient(stop_reason="max_tokens")
+    prompts = load_prompts()
+    with pytest.raises(ValueError, match="Raise --max-tokens"):
+        call_reviewer(
+            client=client,
+            reviewer=prompts.reviewers["FormalVerifier"],
+            chunk=Chunk("Intro", "body"),
+            global_context="ctx",
+            known_issues="none",
+        )
+
+
+# ------------------------------------------------------------------- settings guard
+
+
+@pytest.mark.parametrize("effort", EFFORT_LEVELS)
+def test_validate_settings_accepts_the_default_configuration(effort):
+    validate_settings(load_prompts(), max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
+
+
+def test_validate_settings_rejects_max_tokens_above_the_ceiling():
+    with pytest.raises(ConfigurationError, match="capped at"):
+        validate_settings(load_prompts(), max_tokens=MAX_NONSTREAMING_TOKENS + 1, effort="high")
+
+
+def test_validate_settings_rejects_non_positive_max_tokens():
+    with pytest.raises(ConfigurationError, match="positive integer"):
+        validate_settings(load_prompts(), max_tokens=0, effort="high")
+
+
+def test_validate_settings_rejects_an_unknown_effort_level():
+    with pytest.raises(ConfigurationError, match="--effort must be one of"):
+        validate_settings(load_prompts(), max_tokens=DEFAULT_MAX_TOKENS, effort="turbo")
+
+
+@pytest.mark.parametrize("effort", ["xhigh", "max"])
+def test_validate_settings_rejects_disabled_thinking_on_a_capped_model(effort):
+    """Opus 5 refuses thinking:disabled above `high`, and both thinking-off reviewers
+    would land there if someone pointed --fast-model at it."""
+    prompts = load_prompts(fast_model="claude-opus-5")
+    with pytest.raises(ConfigurationError, match="NotationAuditor"):
+        validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+def test_validate_settings_allows_a_capped_model_at_lower_effort(effort):
+    prompts = load_prompts(fast_model="claude-opus-5")
+    validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
