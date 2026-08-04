@@ -17,7 +17,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Text Processing :: Markup :: LaTeX",
 ]
-dependencies = ["anthropic>=0.100", "pydantic>=2.13", "rich>=15"]
+# The anthropic floor is the version whose request shape this was built and tested
+# against (thinking, output_config, messages.parse). The upper bound is deliberate:
+# the code depends on exact keyword names in a fast-moving SDK.
+dependencies = ["anthropic>=0.120,<1", "pydantic>=2.13,<3", "rich>=15,<17"]
 
 [project.urls]
 Homepage = "https://github.com/nidrissi/llm-reviewer"

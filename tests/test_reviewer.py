@@ -6,6 +6,10 @@ transforms LaTeX text or reads files from a tmp_path fixture.
 
 from __future__ import annotations
 
+import inspect
+from collections import Counter
+from types import SimpleNamespace
+
 import anthropic
 import httpx
 import pytest
@@ -19,9 +23,11 @@ from llm_reviewer.reviewer import (
     FRONT_MATTER_NAME,
     MAX_NONSTREAMING_TOKENS,
     MODEL_PRICING,
+    MODEL_SUPPORT,
     REVIEWER_SPECS,
     Chunk,
     ConfigurationError,
+    Issue,
     IssueWithReviewer,
     Review,
     SeverityLevel,
@@ -34,7 +40,9 @@ from llm_reviewer.reviewer import (
     format_coverage_note,
     load_known_issues,
     load_prompts,
+    mask_non_content,
     resolve_inputs,
+    run_pipeline,
     strip_comment,
     summarize_known_issues,
     validate_settings,
@@ -122,7 +130,7 @@ def test_safe_filename_strips_latex_and_unsafe_characters():
 
 
 def test_safe_filename_truncates_to_80_characters():
-    assert len(_safe_filename("a" * 200)) == 80
+    assert _safe_filename("ab" * 100) == ("ab" * 100)[:80]
 
 
 def test_safe_filename_falls_back_when_nothing_survives():
@@ -191,14 +199,18 @@ def test_resolve_inputs_warns_and_keeps_missing_reference(tmp_path, capsys):
     assert "cannot find" in capsys.readouterr().out
 
 
-def test_resolve_inputs_breaks_cycles(tmp_path):
+def test_resolve_inputs_breaks_cycles(tmp_path, capsys):
     (tmp_path / "a.tex").write_text("A\n\\input{b}\n")
     (tmp_path / "b.tex").write_text("B\n\\input{a}\n")
     main = tmp_path / "main.tex"
     main.write_text("\\input{a}\n")
 
     resolved = resolve_inputs(main)
-    assert "A" in resolved and "B" in resolved
+    # Each file is inlined exactly once and the cycle is reported, rather than the
+    # recursion merely bottoming out against the depth limit.
+    assert resolved.count("A") == 1
+    assert resolved.count("B") == 1
+    assert "circular" in capsys.readouterr().out
 
 
 def test_chunking_sees_sections_from_included_files(tmp_path):
@@ -307,26 +319,64 @@ class FakeParsed:
         self.stop_reason = stop_reason
 
 
+def _assert_sdk_accepts(method_name: str, kwargs: dict) -> None:
+    """Fail if the real SDK method would reject these arguments.
+
+    The stub below accepts anything, so without this the call-shape assertions would
+    keep passing after an SDK signature change. Binding against the real signature is
+    the closest we can get to a live call without credentials.
+    """
+    method = getattr(anthropic.resources.messages.Messages, method_name)
+    inspect.signature(method).bind(None, **kwargs)
+
+
 class FakeClient:
     """Stands in for anthropic.Anthropic, recording what the pipeline sent."""
 
-    def __init__(self, error: Exception | None = None, stop_reason: str = "end_turn"):
+    def __init__(
+        self,
+        error: Exception | None = None,
+        stop_reason: str = "end_turn",
+        issues_per_call: int = 0,
+    ):
         self.error = error
         self.stop_reason = stop_reason
+        self.issues_per_call = issues_per_call
         self.models_probed: list[str] = []
         self.parse_calls: list[dict] = []
         self.messages = self
 
-    def count_tokens(self, model, messages):  # noqa: ARG002 - mirrors the SDK signature
-        self.models_probed.append(model)
+    def count_tokens(self, **kwargs):
+        _assert_sdk_accepts("count_tokens", kwargs)
+        self.models_probed.append(kwargs["model"])
         if self.error is not None:
             raise self.error
-        return object()
+        return SimpleNamespace(input_tokens=100)
 
     def parse(self, **kwargs):
+        _assert_sdk_accepts("parse", kwargs)
         self.parse_calls.append(kwargs)
-        parsed = None if self.stop_reason == "max_tokens" else Review(issues=[])
-        return FakeParsed(parsed, stop_reason=self.stop_reason)
+        if self.error is not None:
+            raise self.error
+        if self.stop_reason == "max_tokens":
+            return FakeParsed(None, stop_reason="max_tokens")
+        location = (
+            kwargs["messages"][0]["content"][1]["text"].split("SECTION TITLE: ")[1].split("\n")[0]
+        )
+        issues = [
+            Issue(
+                title=f"issue {n}",
+                severity="major",
+                type="logic",
+                location=location,
+                quote="q",
+                analysis="a",
+                suggested_fix="f",
+                confidence=0.5,
+            )
+            for n in range(self.issues_per_call)
+        ]
+        return FakeParsed(Review(issues=issues))
 
 
 def api_error(cls: type, status: int, message: str = "nope"):
@@ -484,7 +534,7 @@ def test_validate_settings_rejects_disabled_thinking_on_a_capped_model(effort):
     """Opus 5 refuses thinking:disabled above `high`, and both thinking-off reviewers
     would land there if someone pointed --fast-model at it."""
     prompts = load_prompts(fast_model="claude-opus-5")
-    with pytest.raises(ConfigurationError, match="NotationAuditor"):
+    with pytest.raises(ConfigurationError, match="runs without thinking"):
         validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
 
 
@@ -492,3 +542,268 @@ def test_validate_settings_rejects_disabled_thinking_on_a_capped_model(effort):
 def test_validate_settings_allows_a_capped_model_at_lower_effort(effort):
     prompts = load_prompts(fast_model="claude-opus-5")
     validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
+
+
+def test_validate_settings_rejects_a_model_that_cannot_take_effort_at_all():
+    prompts = load_prompts(fast_model="claude-haiku-4-5")
+    with pytest.raises(ConfigurationError, match="cannot be used here"):
+        validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="high")
+
+
+def test_validate_settings_rejects_an_effort_the_model_lacks():
+    """xhigh arrived with Opus 4.7; 4.6 accepts only low/medium/high/max."""
+    prompts = load_prompts(strong_model="claude-opus-4-6")
+    with pytest.raises(ConfigurationError, match="does not support --effort xhigh"):
+        validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="xhigh")
+
+
+def test_validate_settings_ignores_models_it_has_no_table_entry_for():
+    prompts = load_prompts(strong_model="some-future-model")
+    validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="max")
+
+
+def test_every_priced_model_can_actually_be_driven():
+    """A model advertised in --dry-run pricing must accept the request shape we send."""
+    for model in MODEL_PRICING:
+        support = MODEL_SUPPORT.get(model)
+        assert support is not None and support.efforts, model
+
+
+# ---------------------------------------------------------------- pre-flight hardening
+
+
+def test_check_access_reports_a_rate_limit_instead_of_raising_it():
+    client = FakeClient(api_error(anthropic.RateLimitError, 429, "slow down"))
+    with pytest.raises(ConfigurationError, match="Rate limited"):
+        check_access(client, ["strong"])
+
+
+def test_check_access_reports_a_server_error_instead_of_raising_it():
+    client = FakeClient(api_error(anthropic.InternalServerError, 500, "boom"))
+    with pytest.raises(ConfigurationError, match="returned 500"):
+        check_access(client, ["strong"])
+
+
+def test_fake_client_would_catch_an_sdk_signature_change():
+    """The stub accepts anything, so prove the signature guard is actually live."""
+    with pytest.raises(TypeError):
+        FakeClient().count_tokens(model="m", messages=[], not_a_real_parameter=1)
+
+
+# ------------------------------------------------------------------------- masking
+
+
+def test_commented_out_section_neither_splits_nor_invents_a_chunk():
+    tex = paper(
+        "\\section{Real One}\nReal content.\n"
+        "%\\section{Old Draft Title}\nStill part of Real One.\n"
+        "\\section{Conclusion}\nend"
+    )
+    chunks = chunk_by_section(tex)
+    assert [c.name for c in chunks] == ["Real One", "Conclusion"]
+    assert "Still part of Real One." in chunks[0].content
+
+
+def test_section_inside_verbatim_is_not_a_heading():
+    tex = paper(
+        "\\section{Real One}\nbefore\n"
+        "\\begin{verbatim}\n\\section{References}\n\\end{verbatim}\n"
+        "after\n\\section{Conclusion}\nend"
+    )
+    chunks = chunk_by_section(tex)
+    assert [c.name for c in chunks] == ["Real One", "Conclusion"]
+    # Without masking the skip-list match would have swallowed this text entirely.
+    assert "after" in chunks[0].content
+
+
+def test_commented_out_title_does_not_win_over_the_real_one():
+    tex = paper("body", preamble="%\\title{Wrong}\n\\title{Right}")
+    context = extract_global_context(tex)
+    # The preamble is quoted verbatim further down, comments included, so check the
+    # title heading itself rather than the whole context.
+    title_block = context.split("# PREAMBLE")[0]
+    assert "Right" in title_block
+    assert "Wrong" not in title_block
+
+
+def test_mask_non_content_preserves_length_and_line_structure():
+    tex = "abc % comment\n\\begin{verbatim}\nxyz\n\\end{verbatim}\ntail\n"
+    masked = mask_non_content(tex)
+    assert len(masked) == len(tex)
+    assert masked.count("\n") == tex.count("\n")
+    assert masked.startswith("abc ")
+    assert "comment" not in masked
+    assert "xyz" not in masked
+    assert "tail" in masked
+
+
+# ------------------------------------------------------------------ \input confinement
+
+
+def test_resolve_inputs_refuses_an_absolute_path_outside_the_document(tmp_path, capsys):
+    outside = tmp_path / "secret.tex"
+    outside.write_text("SECRET\n")
+    project = tmp_path / "project"
+    project.mkdir()
+    main = project / "main.tex"
+    main.write_text(f"\\input{{{outside}}}\nbody\n")
+
+    resolved = resolve_inputs(main)
+    assert "SECRET" not in resolved
+    assert "Refusing to inline" in capsys.readouterr().out
+
+
+def test_resolve_inputs_refuses_a_parent_directory_escape(tmp_path, capsys):
+    (tmp_path / "secret.tex").write_text("SECRET\n")
+    project = tmp_path / "project"
+    project.mkdir()
+    main = project / "main.tex"
+    main.write_text("\\input{../secret}\nbody\n")
+
+    resolved = resolve_inputs(main)
+    assert "SECRET" not in resolved
+    assert "Refusing to inline" in capsys.readouterr().out
+
+
+def test_resolve_inputs_handles_a_dotted_filename(tmp_path):
+    (tmp_path / "ch1.2.tex").write_text("DOTTED\n")
+    main = tmp_path / "main.tex"
+    main.write_text("\\input{ch1.2}\n")
+    assert "DOTTED" in resolve_inputs(main)
+
+
+def test_resolve_inputs_handles_the_brace_less_form(tmp_path):
+    (tmp_path / "part.tex").write_text("BRACELESS\n")
+    main = tmp_path / "main.tex"
+    main.write_text("\\input part\n")
+    assert "BRACELESS" in resolve_inputs(main)
+
+
+def test_non_utf8_source_is_a_configuration_error(tmp_path):
+    bad = tmp_path / "latin1.tex"
+    bad.write_bytes(b"\\section{Caf\xe9}\nbody\n")
+    with pytest.raises(ConfigurationError, match="not valid UTF-8"):
+        resolve_inputs(bad)
+
+
+# -------------------------------------------------------------------------- resume
+
+
+def sections(*names_and_bodies: tuple[str, str], front: str = "") -> str:
+    body = front + "".join(f"\\section{{{n}}}\n{b}\n" for n, b in names_and_bodies)
+    return f"\\title{{T}}\n\\begin{{document}}\n{body}\\end{{document}}\n"
+
+
+def review(tmp_path, tex: str, **kwargs):
+    """Run the pipeline over *tex* into a fixed output dir, returning (client, result)."""
+    source = tmp_path / "paper.tex"
+    source.write_text(tex, encoding="utf-8")
+    client = FakeClient(issues_per_call=1)
+    result = run_pipeline(
+        client,
+        str(source),
+        tmp_path / "out",
+        prompts=load_prompts(**kwargs.pop("models", {})),
+        assume_yes=True,
+        **kwargs,
+    )
+    return client, result
+
+
+THREE = (("Alpha", "aaa"), ("Beta", "bbb"), ("Gamma", "ggg"))
+
+
+def test_resume_makes_no_calls_and_no_duplicates_when_nothing_changed(tmp_path):
+    tex = sections(*THREE)
+    first, r1 = review(tmp_path, tex)
+    assert len(first.parse_calls) == 12
+    assert len(r1.issues) == 12
+
+    second, r2 = review(tmp_path, tex)
+    assert second.parse_calls == []
+    assert len(r2.issues) == 12
+    assert Counter(i.location for i in r2.issues) == Counter(i.location for i in r1.issues)
+
+
+def test_resume_reviews_only_the_new_chunk_when_one_is_inserted(tmp_path):
+    """The regression this replaced: a shifted index re-ran everything and, because
+    issues.jsonl is append-only, reported every prior issue twice."""
+    review(tmp_path, sections(*THREE))
+    client, result = review(tmp_path, sections(*THREE, front="Intro prose. " * 60))
+
+    assert len(client.parse_calls) == 4  # the new Front matter chunk only
+    assert len(result.issues) == 16
+    assert max(Counter(i.location for i in result.issues).values()) == 4
+
+
+def test_resume_re_reviews_a_chunk_whose_text_changed(tmp_path):
+    review(tmp_path, sections(*THREE))
+    client, result = review(tmp_path, sections(("Alpha", "REWRITTEN"), *THREE[1:]))
+
+    assert len(client.parse_calls) == 4
+    reviewed = [c["messages"][0]["content"][1]["text"] for c in client.parse_calls]
+    assert all("REWRITTEN" in text for text in reviewed)
+    assert len(result.issues) == 12
+
+
+def test_resume_refuses_when_the_models_changed(tmp_path):
+    review(tmp_path, sections(*THREE))
+    with pytest.raises(ConfigurationError, match="different settings"):
+        review(tmp_path, sections(*THREE), models={"strong_model": "claude-opus-4-7"})
+
+
+def test_resume_refuses_when_effort_changed(tmp_path):
+    review(tmp_path, sections(*THREE))
+    with pytest.raises(ConfigurationError, match="different settings"):
+        review(tmp_path, sections(*THREE), effort="low")
+
+
+def test_resume_recovers_issues_lost_from_the_append_only_log(tmp_path):
+    """A crash between writing a review and appending to issues.jsonl must not lose
+    findings: the stored reviews are the source of truth."""
+    review(tmp_path, sections(*THREE))
+    log = tmp_path / "out" / "issues.jsonl"
+    log.write_text("".join(log.read_text().splitlines(keepends=True)[:3]), encoding="utf-8")
+
+    client, result = review(tmp_path, sections(*THREE))
+    assert client.parse_calls == []
+    assert len(result.issues) == 12
+
+
+def test_resume_re_runs_a_reviewer_whose_stored_review_is_corrupt(tmp_path):
+    review(tmp_path, sections(*THREE))
+    stored = sorted((tmp_path / "out" / "reviews").glob("*.json"))[0]
+    stored.write_text("{ not json", encoding="utf-8")
+
+    client, result = review(tmp_path, sections(*THREE))
+    assert len(client.parse_calls) == 1
+    assert len(result.issues) == 12
+
+
+def test_reviews_without_a_state_file_are_refused_rather_than_ignored(tmp_path):
+    review(tmp_path, sections(*THREE))
+    (tmp_path / "out" / "state.json").unlink()
+    with pytest.raises(ConfigurationError, match="no record of what produced them"):
+        review(tmp_path, sections(*THREE))
+
+
+def test_a_typo_in_the_input_path_creates_no_output_directory(tmp_path):
+    out = tmp_path / "out"
+    with pytest.raises(ConfigurationError):
+        run_pipeline(
+            FakeClient(), str(tmp_path / "nope.tex"), out, prompts=load_prompts(), assume_yes=True
+        )
+    assert not out.exists()
+
+
+def test_declining_the_confirmation_stops_before_any_call(tmp_path, monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda: "n")
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(*THREE), encoding="utf-8")
+    client = FakeClient(issues_per_call=1)
+
+    result = run_pipeline(client, str(source), tmp_path / "out", prompts=load_prompts())
+
+    assert result.aborted is True
+    assert client.parse_calls == []

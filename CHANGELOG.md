@@ -60,6 +60,30 @@ First public release. Everything before this lived only in the author's working 
 - `\title{}` containing braces (for example `\title{Cohomology of $\mathbb{Z}$}`) is now
   extracted correctly.
 
+### Fixed
+
+- Resume is tracked in `review/state.json` against a hash of each section's text, not by
+  the existence of a review file. Previously, editing the paper and re-running silently
+  reused reviews of text that no longer existed and reported them as current, while
+  inserting a section shifted every filename and duplicated every prior issue in the
+  final report. Changing models, effort, or token limits between runs is now refused
+  rather than silently ignored.
+- Issues are rebuilt from the stored reviews rather than from `issues.jsonl`, closing the
+  window where a crash between writing a review and appending to the log lost findings
+  that were sitting intact on disk.
+- Section headings are matched against comment- and verbatim-masked text. A commented-out
+  `\section` no longer splits the section it sits in or invents one, and a `\section`
+  quoted inside `verbatim` no longer deletes the text that follows it from the review.
+- `\input` and `\include` are confined to the document's own directory. An absolute path
+  or a `../` escape previously read the target and sent it to the API.
+- A non-UTF-8 source produces a clear error naming the file instead of an uncaught
+  `UnicodeDecodeError`; Latin-1 is common in older LaTeX.
+- The pre-flight reports rate limits and server errors instead of raising them as
+  tracebacks, and retries briefly first.
+- `--fast-model claude-haiku-4-5` is refused with an explanation: Haiku 4.5 rejects the
+  effort and thinking settings every call carries, so it could not have worked.
+- A typo in the input path no longer leaves an empty output directory behind.
+
 ### Removed
 
 - The unused `RapidFuzz` dependency, and `.github/requirements.txt` in favour of

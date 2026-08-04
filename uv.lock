@@ -238,9 +238,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.100" },
-    { name = "pydantic", specifier = ">=2.13" },
-    { name = "rich", specifier = ">=15" },
+    { name = "anthropic", specifier = ">=0.120,<1" },
+    { name = "pydantic", specifier = ">=2.13,<3" },
+    { name = "rich", specifier = ">=15,<17" },
 ]
 
 [package.metadata.requires-dev]
