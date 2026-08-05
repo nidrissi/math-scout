@@ -219,8 +219,10 @@ class LoadedPrompts:
     final_referee: str
     review_protocol: str
     # The final referee runs on the same model as the strong reviewers. Recorded here
-    # rather than looked up through a reviewer name, which would break on a rename.
-    strong_model: str = DEFAULT_MODEL_STRONG
+    # rather than looked up through a reviewer name, which would break on a rename. No
+    # default: it must agree with the strong reviewers' models, and only load_prompts
+    # is in a position to make that true.
+    strong_model: str
 
     def scoped(self, scope: ReviewerScope) -> dict[str, ReviewerConfig]:
         """The reviewers that run at *scope*, in their declared order."""
@@ -251,8 +253,8 @@ class PipelineResult:
 #
 # Thinking is decided per reviewer, on the shape of its task rather than its tier:
 # judging whether a proof step follows, or building a counterexample, is multi-step
-# reasoning; checking that a symbol was defined or a \ref resolves is scanning and
-# matching, and gains nothing from thinking but costs tokens and latency for it.
+# reasoning; reading one section for passages that will not land is a single judgement
+# per passage, and gains nothing from thinking but costs tokens and latency for it.
 #
 # Scope follows the shape of the question. Whether an inference holds is decidable from
 # the argument in front of you; whether a symbol means the same thing on page 4 as on
@@ -261,13 +263,19 @@ class PipelineResult:
 # the final referee then has to discard. Paper-scoped reviewers run last, so they see
 # every section finding.
 #
+# Scope can move a reviewer across the thinking line, and it did: NotationAuditor thinks
+# because whole-paper consistency is not the lookup that per-section consistency was.
+# Tracing the order in which results are actually established, and collapsing every
+# occurrence of one symbol into a single finding, are both multi-step over a long
+# document. It stays on the fast tier — the work is bookkeeping, not mathematics.
+#
 # Insertion order is the order reviewers run in.
 REVIEWER_SPECS: dict[str, ReviewerSpec] = {
     "FormalVerifier": ReviewerSpec("formal_verifier.md", "strong", thinking=True),
     "AdversarialSkeptic": ReviewerSpec("adversarial_skeptic.md", "strong", thinking=True),
     "ExpositionReferee": ReviewerSpec("exposition_referee.md", "fast", thinking=False),
     "NotationAuditor": ReviewerSpec(
-        "notation_auditor.md", "fast", thinking=False, scope=ReviewerScope.PAPER
+        "notation_auditor.md", "fast", thinking=True, scope=ReviewerScope.PAPER
     ),
     "ClaimAuditor": ReviewerSpec(
         "claim_auditor.md", "strong", thinking=True, scope=ReviewerScope.PAPER
@@ -946,7 +954,7 @@ def call_reviewer(
     chunk: Chunk,
     global_context: str,
     known_issues: str,
-    review_protocol: str = "",
+    review_protocol: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
 ):
@@ -1516,7 +1524,7 @@ def run_dry_run(
     print(
         f"[bold green]Max output cost: ${max_output_cost:.2f}[/bold green]  "
         f"(a ceiling nobody reaches: it assumes all {sum(call_counts.values())} calls "
-        f"emit the full {max_tokens:,} output tokens, and {no_thinking} of the "
-        f"{len(prompts.reviewers)} reviewers run without thinking)"
+        f"emit the full {max_tokens:,} output tokens, and {no_thinking} of "
+        f"{len(prompts.reviewers)} reviewers have thinking disabled)"
     )
     print(f"[bold green]Max total cost: ${input_cost + max_output_cost:.2f}[/bold green]")

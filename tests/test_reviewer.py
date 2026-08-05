@@ -34,6 +34,7 @@ from llm_reviewer.reviewer import (
     Review,
     ReviewerScope,
     SeverityLevel,
+    _build_messages,
     _build_system,
     _format_issue_full,
     _safe_filename,
@@ -493,13 +494,21 @@ def test_load_prompts_applies_the_requested_models():
     assert prompts.strong_model == "strong-x"
 
 
-def test_every_reviewer_prompt_names_the_issue_block_the_pipeline_actually_sends():
-    """The prompts used to point at a `KNOWN ISSUES` block that was never built."""
+def test_the_issue_block_is_named_once_and_matches_what_the_pipeline_sends():
+    """The prompts used to point at a `KNOWN ISSUES` block that was never built.
+
+    The real name belongs in the protocol, which every reviewer is sent; a reviewer prompt
+    repeating it is drift waiting to happen, and naming a different one is the old bug.
+    """
     prompts = load_prompts()
-    texts = [r.prompt_text for r in prompts.reviewers.values()]
-    texts += [prompts.review_protocol, prompts.final_referee]
-    assert any("DETECTED ISSUES" in text for text in texts)
-    assert not any("KNOWN ISSUES" in text for text in texts)
+    reviewer_texts = [r.prompt_text for r in prompts.reviewers.values()]
+    all_texts = [*reviewer_texts, prompts.review_protocol, prompts.final_referee]
+
+    heading = _build_messages("issues", "target")[0]["content"][0]["text"].split("\n")[0]
+    assert heading == "# DETECTED ISSUES"
+    assert "DETECTED ISSUES" in prompts.review_protocol
+    assert not any("DETECTED ISSUES" in text for text in reviewer_texts)
+    assert not any("KNOWN ISSUES" in text for text in all_texts)
 
 
 def test_the_review_protocol_is_its_own_cached_system_block():
@@ -518,6 +527,18 @@ def test_the_final_referee_gets_no_review_protocol():
     """It writes markdown; the protocol describes the JSON issue schema."""
     blocks = _build_system("ctx", "referee")
     assert [b["text"] for b in blocks] == ["# GLOBAL CONTEXT\nctx", "# REVIEWER PROMPT\nreferee"]
+
+
+def test_every_reviewer_call_in_a_run_carries_the_protocol(tmp_path):
+    """Asserting on _build_system alone would not notice the pipeline forgetting to pass
+    it: the protocol would silently vanish from every call and the suite would stay green."""
+    client, _ = review(tmp_path, sections(*THREE))
+    protocol = load_prompts().review_protocol
+
+    for call in client.parse_calls:
+        headings = [b["text"].split("\n")[0] for b in call["system"]]
+        assert headings == ["# GLOBAL CONTEXT", "# REVIEW PROTOCOL", "# REVIEWER PROMPT"]
+        assert call["system"][1]["text"] == "# REVIEW PROTOCOL\n" + protocol
 
 
 # ----------------------------------------------------------------------------- scope
@@ -573,20 +594,23 @@ def test_default_effort_is_a_valid_level():
 # --------------------------------------------------------------------------- thinking
 
 
-def test_thinking_is_enabled_for_the_deductive_reviewers_only():
+def test_only_the_single_pass_reviewer_runs_without_thinking():
+    """Thinking follows the shape of the task. Everything here is multi-step except
+    reading one section for passages that will not land, which is one call per passage."""
     thinking = {name: spec.thinking for name, spec in REVIEWER_SPECS.items()}
     assert thinking == {
         "FormalVerifier": True,
         "AdversarialSkeptic": True,
         "ClaimAuditor": True,
-        "NotationAuditor": False,
+        # Whole-paper consistency is not the lookup that per-section consistency was.
+        "NotationAuditor": True,
         "ExpositionReferee": False,
     }
 
 
 @pytest.mark.parametrize(
     ("reviewer_name", "expected"),
-    [("FormalVerifier", "adaptive"), ("NotationAuditor", "disabled")],
+    [("FormalVerifier", "adaptive"), ("ExpositionReferee", "disabled")],
 )
 def test_call_reviewer_sends_the_reviewer_s_thinking_config(reviewer_name, expected):
     client = FakeClient()

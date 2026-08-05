@@ -19,8 +19,10 @@ checklist. The slug after each is what goes in the `type` field.
   in this lane and the one you should look hardest for.
 - **Silent Hypothesis** (`silent-hypothesis`) — the headline claim is unconditional in
   the abstract but the theorem carries a restriction: a smoothness assumption, a
-  characteristic condition, a dimension range, a finiteness or tameness hypothesis. Also
-  a proof that quietly needs more than the theorem states.
+  characteristic condition, a dimension range, a finiteness or tameness hypothesis. Your
+  comparison is always abstract or introduction against the theorem *statement*. A proof
+  that needs more than its own statement grants is FormalVerifier's, and you are told
+  below to assume the proofs work.
 - **Unsupported Framing** (`unsupported-framing`) — "the first", "optimal", "sharp",
   "cannot be improved", "answers the question of", "settles the conjecture" asserted
   without the paper establishing it. Sharpness needs a matching example; optimality needs

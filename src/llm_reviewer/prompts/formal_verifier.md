@@ -12,7 +12,10 @@ is an illustrative list, not a checklist. Adapt it to the mathematical domain of
 text. The slug after each entry is what goes in the `type` field.
 
 - **Hidden Hypotheses** (`hidden-hypothesis`) — applying a standard theorem or lemma
-  without verifying its preconditions.
+  without verifying its preconditions, or a proof that needs a hypothesis its own
+  statement does not grant. This second one is yours alone: NotationAuditor reports when
+  a statement and its proof disagree about which hypotheses are in play, but deciding
+  that the argument genuinely *requires* the missing one is a mathematical judgement.
 - **Ill-Defined Constructions** (`ill-defined`) — defining an object via a limit,
   supremum, infinite sum, or universal property without proving it exists or is unique.
 - **Citation Drift** (`citation-drift`) — appealing to an external result but applying it

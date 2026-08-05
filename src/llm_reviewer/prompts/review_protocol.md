@@ -50,9 +50,10 @@ to you. Therefore:
 - A "forward reference to a result that does not exist" is not something you are in a
   position to observe. Do not report one.
 
-A whole-paper reviewer covers all of the above, and its findings will be in
-`DETECTED ISSUES` if it has already run. Filing a guess at one of these from inside a
-single section adds a false positive that a later pass has to pay to remove.
+All of the above is covered by a reviewer that reads the whole document, and that pass
+runs after every section has been read — so it is not your job, and it will not yet
+appear in `DETECTED ISSUES`. Filing a guess at one of these from inside a single section
+adds a false positive that a later pass has to pay to remove.
 
 ## Severity
 
@@ -66,10 +67,21 @@ paper's claims?** Not how much work the fix is, and not how annoyed the reader w
 - `moderate` — a localized defect with a clear local fix that leaves every claim intact.
 - `minor` — a small slip, easily patched, with no bearing on any claim.
 
-`critical` is for findings that bear on whether the mathematics holds. A finding about
-how the paper reads, or about how its symbols are spelled, is at most `major` however
-severe it is in its own terms — the exception being a statement that is genuinely
-ambiguous or self-contradictory, so that there is no single claim to evaluate.
+`critical` is for findings that bear on whether the mathematics holds. A finding about how
+the paper reads, or about how its symbols are spelled, is at most `major` however severe it
+is in its own terms. The one exception is a *statement* — a theorem, definition, or
+hypothesis — that is itself ambiguous or self-contradictory, so that there is no single
+claim to evaluate: that may be `critical`, because nothing can be verified until it is
+resolved. A passage being hard to read is never that.
+
+**Findings that are not about correctness** — exposition, notation, presentation — cannot
+be graded on the claims, because by construction they leave the claims alone. Grade them
+instead on how much of the paper a reader cannot use as written:
+
+- `major` — an expert cannot follow, or cannot unambiguously interpret, a main result or
+  its proof without doing work the paper should have done.
+- `moderate` — one passage costs a re-read or a guess that a sentence would have saved.
+- `minor` — noticeable, easily fixed, and it costs the reader nothing real.
 
 Grade each finding on its own. Do not inflate a finding because it is the only one you
 have, and do not deflate one because you have already filed something worse.
