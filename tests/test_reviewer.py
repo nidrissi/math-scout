@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 from collections import Counter
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import anthropic
@@ -25,6 +26,7 @@ from llm_reviewer.reviewer import (
     MAX_NONSTREAMING_TOKENS,
     MODEL_PRICING,
     MODEL_SUPPORT,
+    MOVING_SUFFIX,
     REVIEWER_SPECS,
     WHOLE_PAPER_NAME,
     Chunk,
@@ -151,7 +153,12 @@ def test_safe_filename_collides_but_chunk_stem_does_not():
     a, b = Chunk("The \\alpha case", ""), Chunk("The \\beta case", "")
     assert _safe_filename(a.name) == _safe_filename(b.name)
     assert chunk_stem(3, a) != chunk_stem(4, b)
-    assert chunk_stem(3, a).startswith("03_")
+    assert chunk_stem(3, a).startswith("003_")
+
+
+def test_chunk_stem_index_still_sorts_past_a_hundred_chunks():
+    stems = sorted(chunk_stem(i, Chunk("S", "")) for i in (9, 99, 100))
+    assert stems == [chunk_stem(9, Chunk("S", "")), "099_S", "100_S"]
 
 
 # ---------------------------------------------------------------------- \input files
@@ -889,6 +896,114 @@ def test_resume_reviews_only_the_new_chunk_when_one_is_inserted(tmp_path):
     assert len(client.parse_calls) == SECTION_CALLS + PAPER_CALLS
     assert len(result.issues) == 4 * SECTION_CALLS + PAPER_CALLS
     assert max(Counter(i.location for i in result.issues).values()) == SECTION_CALLS
+
+
+# ------------------------------------------------------------------ output hygiene
+
+
+def stems_in(directory: Path) -> list[str]:
+    return sorted(p.name for p in directory.iterdir())
+
+
+def test_an_insertion_leaves_no_file_at_a_stale_position(tmp_path):
+    """Before this, chunks/ held both 00_Alpha.tex and 01_Alpha.tex with nothing to say
+    which was current, and reviews/ sorted in an order the paper never had."""
+    review(tmp_path, sections(*THREE))
+    review(tmp_path, sections(*THREE, front="Intro prose. " * 60))
+    out = tmp_path / "out"
+
+    assert stems_in(out / "chunks") == [
+        "000_Front_matter.tex",
+        "001_Alpha.tex",
+        "002_Beta.tex",
+        "003_Gamma.tex",
+        "004_whole_paper.tex",
+    ]
+    # Sorted, the review files now read in document order, which is the whole point of
+    # the index prefix.
+    positions = [name.split("_")[0] for name in stems_in(out / "reviews")]
+    assert positions == sorted(positions)
+    assert {name.split("_", 1)[1].rsplit("_", 1)[0] for name in stems_in(out / "reviews")} == {
+        "Front_matter",
+        "Alpha",
+        "Beta",
+        "Gamma",
+        "whole_paper",
+    }
+
+
+def test_renaming_a_reused_review_does_not_re_run_it(tmp_path):
+    """The rename is bookkeeping. Paying for the review again would defeat the point."""
+    review(tmp_path, sections(*THREE))
+    client, result = review(tmp_path, sections(*THREE, front="Intro prose. " * 60))
+
+    # Match the section heading, not the text: the whole-paper pass sees "Alpha" too.
+    targets = [c["messages"][0]["content"][1]["text"] for c in client.parse_calls]
+    assert not any("SECTION TITLE: Alpha" in t for t in targets)
+    assert (tmp_path / "out" / "reviews" / "001_Alpha_FormalVerifier.json").is_file()
+    assert len(result.issues) == 4 * SECTION_CALLS + PAPER_CALLS
+
+
+def test_a_deleted_section_takes_its_reviews_with_it(tmp_path):
+    review(tmp_path, sections(*THREE))
+    review(tmp_path, sections(*THREE[:2]))
+    out = tmp_path / "out"
+
+    assert not any("Gamma" in name for name in stems_in(out / "reviews"))
+    assert not any("Gamma" in name for name in stems_in(out / "chunks"))
+
+
+def test_two_sections_sharing_a_name_can_swap_without_clobbering_each_other(tmp_path):
+    """A rename's target is another rename's source here, so a direct move would
+    overwrite a live review with a different chunk's findings."""
+    # A trailing section keeps either swapped chunk from being the last one, which would
+    # absorb \end{document} and change its key — then nothing would be reused and there
+    # would be no rename to collide.
+    a, b, tail = ("Lemmas", "aaa"), ("Lemmas", "bbb"), ("Tail", "zzz")
+    review(tmp_path, sections(a, b, tail))
+    client, result = review(tmp_path, sections(b, a, tail))
+    out = tmp_path / "out"
+
+    # Both swapped reviews were reused, so both had to be renamed past each other.
+    targets = [c["messages"][0]["content"][1]["text"] for c in client.parse_calls]
+    assert not any("SECTION TITLE: Lemmas" in t for t in targets)
+    assert stems_in(out / "chunks") == [
+        "000_Lemmas.tex",
+        "001_Lemmas.tex",
+        "002_Tail.tex",
+        "003_whole_paper.tex",
+    ]
+    assert (out / "chunks" / "000_Lemmas.tex").read_text().endswith("bbb\n")
+    assert (out / "chunks" / "001_Lemmas.tex").read_text().endswith("aaa\n")
+    assert len(result.issues) == 3 * SECTION_CALLS + PAPER_CALLS
+
+
+def test_debris_from_an_interrupted_rename_is_swept(tmp_path):
+    review(tmp_path, sections(*THREE))
+    reviews = tmp_path / "out" / "reviews"
+    (reviews / f"000_Alpha_FormalVerifier.json{MOVING_SUFFIX}").write_text("{}", encoding="utf-8")
+
+    client, result = review(tmp_path, sections(*THREE))
+
+    assert not list(reviews.glob(f"*{MOVING_SUFFIX}"))
+    assert client.parse_calls == []  # sweeping debris must not invalidate a real review
+    assert len(result.issues) == THREE_CALLS
+
+
+def test_declining_the_run_deletes_nothing(tmp_path, monkeypatch):
+    review(tmp_path, sections(*THREE))
+    before = stems_in(tmp_path / "out" / "reviews")
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda: "n")
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(*THREE[:1]), encoding="utf-8")
+    result = run_pipeline(
+        FakeClient(issues_per_call=1), str(source), tmp_path / "out", prompts=load_prompts()
+    )
+
+    assert result.aborted is True
+    assert stems_in(tmp_path / "out" / "reviews") == before
 
 
 def test_resume_re_reviews_a_chunk_whose_text_changed(tmp_path):

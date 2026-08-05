@@ -208,14 +208,20 @@ Everything lands in the output directory (default `<input_dir>/review/`):
 | File | Contents |
 |---|---|
 | `final_report.md` | The final referee report — start here |
-| `chunks/NN_<section>.tex` | The exact LaTeX each reviewer saw, including the whole-paper chunk |
-| `reviews/NN_<section>_<reviewer>.json` | Raw JSON from each reviewer per chunk |
+| `chunks/NNN_<section>.tex` | The exact LaTeX each reviewer saw, including the whole-paper chunk |
+| `reviews/NNN_<section>_<reviewer>.json` | Raw JSON from each reviewer per chunk |
 | `all_issues.json` | Every issue behind the current report, as a JSON array |
 | `issues.jsonl` | Append-only log of every issue ever produced here, one per line |
 | `state.json` | Resume bookkeeping — which reviews are complete, and under what settings |
 
 `all_issues.json` is the authoritative set for the current report. `issues.jsonl` is a
 log: if you edit the paper and re-run, it keeps the superseded findings too.
+
+The numbered prefix is the chunk's position in the document, so both directories sort in
+reading order. A re-run keeps that true: reviews it reuses are renamed into their new
+positions, and files left over from a previous structure are deleted rather than left
+sitting next to the current ones. Everything you see under `chunks/` and `reviews/`
+belongs to the run that produced the report beside it.
 
 If any reviewer call fails, the run says so, the final report is told to state its own
 coverage gaps, and the exit code is `1`. A failing run never silently presents partial
