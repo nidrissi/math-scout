@@ -7,6 +7,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- `chunks/` and `reviews/` accumulated files from earlier runs. Nothing removed them, and
+  a reused review kept the filename it was first written under, so after inserting or
+  deleting a section the index prefixes no longer matched the document — `chunks/` could
+  hold both `00_Alpha.tex` and `01_Alpha.tex` with no way to tell which was current.
+  Reviews are now renamed into their new positions when a chunk moves, and anything
+  neither the current chunks nor `state.json` account for is deleted. Nothing is re-run:
+  the rename is bookkeeping, not a re-review.
+- The chunk index is three digits, so the prefix still sorts past a hundred sections.
+  Existing output directories rename themselves on the next run.
+
 Prompt audit: the reviewer set, the prompts, and the plumbing between them.
 
 **This invalidates existing output directories.** `run_settings` now records a hash of
