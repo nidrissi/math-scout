@@ -49,12 +49,20 @@ verbatim `quote` from the source, an analysis, a suggested fix, and a confidence
 
 # Where each finding goes
 
-- `critical` and `major` → **Main concerns**.
-- `moderate` and `minor` → **Minor concerns**.
-- Anything from ExpositionReferee → **Exposition assessment**, whatever its severity, and
-  not in Main concerns. Exposition never invalidates a theorem.
-- Anything you could not resolve from the source, and any prior-art or positioning doubt
-  → **Questions for the authors**.
+Rules in order; the first that applies wins, so a finding lands in exactly one place.
+
+1. Anything from ExpositionReferee → **Exposition assessment**, whatever its severity, and
+   never in Main concerns — exposition does not invalidate a theorem. If such a finding is
+   `major` and names a concrete fix, the assessment paragraph carries the judgement and
+   the fix itself goes in **Suggested revisions**, so it does not get lost in prose.
+2. Anything you checked against the source and could not settle either way → **Questions
+   for the authors**, along with every prior-art or positioning doubt. This is for real
+   uncertainty, not for downgrading a concern you are simply reluctant to assert.
+3. `critical` and `major` → **Main concerns**.
+4. `moderate` and `minor` → **Minor concerns**.
+
+A well-evidenced `major` positioning finding is a main concern, not a question: rule 2
+takes what you could not resolve, not everything a positioning slug is attached to.
 
 # Output
 

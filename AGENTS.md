@@ -4,7 +4,7 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## What this project does
 
-`llm-reviewer` is a multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a `.tex` file into sections, runs four specialized Claude-based reviewers on each section in sequence, and synthesizes a final referee report in markdown.
+`llm-reviewer` is a multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a `.tex` file into sections, runs five specialized Claude-based reviewers in sequence — three over each section, two over the whole source — and synthesizes a final referee report in markdown.
 
 ## Running the pipeline
 
@@ -54,12 +54,12 @@ tests/test_reviewer.py          # pure-function tests; no network, no credential
 | `FormalVerifier` | strong | adaptive | section | Proof gaps, invalid inferences, hidden assumptions, load-bearing computations |
 | `AdversarialSkeptic` | strong | adaptive | section | Edge cases, brittle arguments, suspicious steps |
 | `ExpositionReferee` | fast | disabled | section | Readability, missing intuition, proof strategy clarity |
-| `NotationAuditor` | fast | disabled | **paper** | Notation consistency, convention drift, broken references, circularity |
+| `NotationAuditor` | fast | adaptive | **paper** | Notation consistency, convention drift, undefined and broken references, circularity |
 | `ClaimAuditor` | strong | adaptive | **paper** | Overclaiming: abstract and introduction against what the theorems prove |
 
 Tiers map to concrete model IDs via `--strong-model` / `--fast-model`, defaulting to `DEFAULT_MODEL_STRONG` and `DEFAULT_MODEL_FAST`. Every reviewer returns the same JSON schema: `{ issues: [ { title, severity, type, location, quote, analysis, suggested_fix, confidence } ] }`.
 
-Thinking is a property of the task, not the tier. `ReviewerConfig.thinking_config` turns the flag into the API parameter. The final referee always thinks. `--effort` applies uniformly to every call.
+Thinking is a property of the task, not the tier — and scope can move a reviewer across that line, as it did for `NotationAuditor`: whole-paper consistency means tracing the order results are established in and collapsing every occurrence of a symbol into one finding, which is not the lookup that per-section consistency was. `ReviewerConfig.thinking_config` turns the flag into the API parameter. The final referee always thinks. `--effort` applies uniformly to every call.
 
 Scope is also a property of the task. Consistency and overclaiming are relations between two places in the document, so they are not decidable from one section; asking a section-scoped reviewer for them yields guesses that the final referee has to pay to discard. `LoadedPrompts.scoped()` partitions the reviewers, and `_format_review_target` labels the payload `SECTION UNDER REVIEW` or `FULL PAPER UNDER REVIEW` accordingly.
 
@@ -71,7 +71,7 @@ The final referee (`prompts/final_referee.md`) receives global context + all iss
 
 ## Invariants worth preserving
 
-- **Resume hangs off `state.json`, not off filenames.** Chunks are identified by `chunk_key` (a hash of title + text), so an inserted section does not shift every identity, and an edited section is re-reviewed while its neighbours are not. Filenames keep their index prefix purely so output sorts in document order. A settings change (models, effort, max tokens, or the prompt text itself via `prompts_digest`) is refused rather than silently reusing incomparable reviews. The whole-paper chunk's key must be passed to `state.prune` alongside the section keys, or its reviews are discarded on every resume.
+- **Resume hangs off `state.json`, not off filenames.** Chunks are identified by `chunk_key` (a hash of title + text), so an inserted section does not shift every identity, and an edited section is re-reviewed while its neighbours are not. Filenames carry an index prefix so a single run's output sorts in document order — but nothing prunes `chunks/` or `reviews/`, so across runs that shift the section count both directories accumulate stale stems and the ordering stops being trustworthy. `state.json` is the only reliable map from chunk to review file. A settings change (models, effort, max tokens, or the prompt text itself via `prompts_digest`) is refused rather than silently reusing incomparable reviews. The whole-paper chunk's key must be passed to `state.prune` alongside the section keys, or its reviews are discarded on every resume.
 - **`reviews/*.json` is the source of truth for issues, not `issues.jsonl`.** `all_issues.json` is rebuilt from the stored reviews each run, so a crash between writing a review and appending to the log costs at most a repeated call. `issues.jsonl` is an append-only log and may hold superseded entries.
 - **Section structure is matched against `mask_non_content(tex)`**, never the raw text, so a commented-out or verbatim-quoted `\section` neither invents a chunk nor truncates its neighbour. The mask preserves character offsets, so matches still index into the original.
 - **`\input` targets are confined to the document's directory** (`_is_within`). Papers come from other people; without this, `\input{/etc/passwd}` would exfiltrate to the API.

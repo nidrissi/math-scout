@@ -36,7 +36,9 @@ proof checker.
 Each reviewer returns structured JSON issues (`title`, `severity`, `type`, `location`,
 `quote`, `analysis`, `suggested_fix`, `confidence`). A final referee pass then synthesises
 all of them into one report. Non-mathematical sections (References, Bibliography,
-Acknowledgments) are skipped automatically.
+Acknowledgments) are dropped from the section passes automatically; the two whole-paper
+reviewers still see the raw source, deliberately, since one needs every `\label` and the
+other needs the introduction — which the front-matter threshold can otherwise discard.
 
 Scope follows the shape of the question. Whether an inference holds is decidable from the
 argument in front of you, so those reviewers work section by section. Whether a symbol
@@ -137,7 +139,7 @@ llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/
 | `--output DIR` | Where to write results (default: `<input_dir>/review/`) |
 | `--dry-run` | Count tokens and estimate cost; send no generation requests |
 | `-y`, `--yes` | Skip the confirmation prompt. Required when stdin is not a terminal |
-| `--strong-model ID` | Model for the two deep reviewers and the final referee |
+| `--strong-model ID` | Model for the three deep reviewers and the final referee |
 | `--fast-model ID` | Model for the two lighter reviewers |
 | `--max-tokens N` | Output token limit per call (default 16000, maximum 21333) |
 | `--effort LEVEL` | `low`, `medium`, `high`, `xhigh`, or `max` (default `high`) |
@@ -186,10 +188,15 @@ each section's text, which means:
 
 - **Editing the paper works.** Sections you changed are reviewed again; sections you
   didn't are reused. Inserting or deleting a section doesn't disturb the others.
-- **Changing `--strong-model`, `--fast-model`, `--effort`, or `--max-tokens` is refused.**
-  The stored reviews were produced under different settings, and presenting them as the
-  output of the new ones would be a lie. Use a different `--output` or delete the
-  directory.
+- **The two whole-paper passes re-run on any edit.** They are keyed on the whole source,
+  so changing one character anywhere invalidates both. That is correct — a notation drift
+  or an overclaim can be created by an edit in a section neither pass would otherwise
+  revisit — but it means a resumed run is rarely free, and those two are the most
+  expensive calls in it. The pre-run call count tells you before you pay.
+- **Changing `--strong-model`, `--fast-model`, `--effort`, `--max-tokens`, or a prompt
+  file is refused.** The stored reviews were produced under different settings, and
+  presenting them as the output of the new ones would be a lie. Use a different
+  `--output` or delete the directory.
 
 Before it starts, the run prints how many calls it will make and how many it is reusing,
 so you see the cost implication before confirming.

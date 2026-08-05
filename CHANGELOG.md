@@ -9,9 +9,11 @@ All notable changes to this project are documented here. The format is based on
 
 Prompt audit: the reviewer set, the prompts, and the plumbing between them.
 
-**This invalidates existing output directories.** `run_settings` now records a hash of the
-prompt text, so a `review/` produced before this change is refused rather than mixed with
-findings from the new prompts. Delete it, or pass a different `--output`.
+**This invalidates existing output directories.** `run_settings` now records a hash of
+every prompt that shapes a stored review — the protocol and the five reviewer prompts, but
+not `final_referee.md`, which shapes only the report and is regenerated on every run. A
+`review/` produced before this change is refused rather than mixed with findings from the
+new prompts. Delete it, or pass a different `--output`.
 
 ### Added
 
@@ -57,6 +59,27 @@ findings from the new prompts. Delete it, or pass a different `--output`.
 - `ExpositionReferee` findings are capped at `major` and routed to the report's exposition
   section. A hard-to-follow proof was previously able to enter Main concerns beside a
   theorem that does not hold.
+
+### Changed
+
+- `NotationAuditor` now runs with thinking enabled. Whole-paper scope turned its job into
+  tracing the order in which results are actually established and collapsing every
+  occurrence of a symbol into one finding — neither is the lookup that per-section
+  consistency checking was. It stays on the fast tier: the work is bookkeeping, not
+  mathematics.
+- The shared severity scale now says how it applies to findings that are not about
+  correctness. Grading exposition and notation purely against the paper's claims left
+  them no rung above `minor`, since by construction they leave the claims alone.
+- "A statement carries a hypothesis its proof never uses" and "a proof needs a hypothesis
+  its statement does not grant" were claimable by three reviewers under three type slugs,
+  and `notation_auditor.md` asserted and disclaimed the same defect twelve lines apart.
+  Each direction now has exactly one owner.
+- The final referee's routing rules are ordered and disjoint, so a finding lands in one
+  section rather than matching two rules with no stated precedence.
+- "Used but never defined anywhere in the paper" belonged to nobody: section reviewers
+  are told to presume such a symbol is defined elsewhere, and nothing picked it up
+  afterwards. It is `NotationAuditor`'s, which is the only pass that can see the whole
+  document.
 
 ## [0.1.0a1] — 2026-08-03
 

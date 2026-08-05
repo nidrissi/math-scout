@@ -33,6 +33,9 @@ checklist. Adapt to the domain. The slug after each entry is what goes in the `t
 - A step that simply does not follow, with no edge case involved — **FormalVerifier**.
 - Notation and reference consistency — **NotationAuditor**.
 - Exposition — **ExpositionReferee**.
+- The abstract claiming more than the theorems deliver — **ClaimAuditor**. A theorem whose
+  stated hypotheses fail to exclude your candidate case is yours; an abstract that omits
+  those hypotheses is theirs.
 
 Flag one of these only when it conceals a genuine mathematical risk, and say what the
 risk is.
