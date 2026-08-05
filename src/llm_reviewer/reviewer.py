@@ -59,6 +59,10 @@ REVIEW_PROTOCOL_PROMPT = "review_protocol.md"
 STATE_FILE = "state.json"
 STATE_VERSION = 1
 
+# Suffix a review file wears while it is being renamed into a new position. Anything
+# still carrying it is the debris of an interrupted rename and gets swept.
+MOVING_SUFFIX = ".moving"
+
 # Section titles (case-insensitive, LaTeX-stripped) that are skipped during review.
 _SKIP_SECTIONS = frozenset({"references", "bibliography", "acknowledgments", "acknowledgements"})
 
@@ -416,8 +420,13 @@ def _safe_filename(name: str) -> str:
 
 
 def chunk_stem(index: int, chunk: Chunk) -> str:
-    """Filename stem for a chunk, prefixed by position so distinct sections never collide."""
-    return f"{index:02d}_{_safe_filename(chunk.name)}"
+    """Filename stem for a chunk, prefixed by position so distinct sections never collide.
+
+    Three digits, so the prefix still sorts lexicographically past a hundred chunks.
+    Widening it renames every stored review, which `retarget_reviews` does on the next
+    run without re-reviewing anything.
+    """
+    return f"{index:03d}_{_safe_filename(chunk.name)}"
 
 
 def extract_text(response) -> str:
@@ -1182,6 +1191,57 @@ def _load_review(path: Path) -> Review | None:
         return None
 
 
+def retarget_reviews(state: ResumeState, stems: dict[str, str], reviews_dir: Path) -> int:
+    """Move stored reviews to the filenames this run's chunk positions imply.
+
+    A reused review keeps whatever name it was written under, and the index prefix in
+    that name encodes the chunk's position at the time. Insert a section and every later
+    chunk's position shifts while its stored review does not, so the directory stops
+    sorting in document order and a reader cannot tell which file is current.
+
+    Renaming is safe to interrupt: the move is atomic, and a crash before *state* is
+    saved leaves it naming a file that is gone, which `_load_review` reports as not done
+    and the run repeats. That costs one call and loses nothing, the same trade the rest
+    of the resume bookkeeping makes.
+    """
+    moves = [
+        (key, reviewer, stored, f"{stems[key]}_{reviewer}.json")
+        for key, reviewers in state.completed.items()
+        if key in stems
+        for reviewer, stored in reviewers.items()
+    ]
+    moves = [m for m in moves if m[2] != m[3] and (reviews_dir / m[2]).is_file()]
+    if not moves:
+        return 0
+
+    # Two phases. One rename's target can be another's source — two sections sharing a
+    # title but not a body get the same safe name and different keys, so swapping their
+    # positions makes the moves collide — and a direct move would overwrite a live file.
+    for _, _, stored, _ in moves:
+        (reviews_dir / stored).replace(reviews_dir / (stored + MOVING_SUFFIX))
+    for key, reviewer, stored, wanted in moves:
+        (reviews_dir / (stored + MOVING_SUFFIX)).replace(reviews_dir / wanted)
+        state.completed[key][reviewer] = wanted
+    return len(moves)
+
+
+def sweep(directory: Path, live: set[str], patterns: tuple[str, ...]) -> list[str]:
+    """Delete files matching *patterns* that are not in the *live* set, returning names.
+
+    These directories are written and owned by the pipeline — `load_resume_state` already
+    refuses to run against a `reviews/` it has no record of producing — so a file nothing
+    accounts for is left over from an earlier run. Keeping it is not harmless: it is
+    indistinguishable from current output.
+    """
+    removed = []
+    for pattern in patterns:
+        for path in sorted(directory.glob(pattern)):
+            if path.is_file() and path.name not in live:
+                path.unlink()
+                removed.append(path.name)
+    return removed
+
+
 def _confirm(assume_yes: bool) -> bool:
     """Ask the user to confirm the run, or fail loudly when there is nobody to ask."""
     if assume_yes:
@@ -1269,6 +1329,23 @@ def run_pipeline(
         print("[red]Aborting review.[/red]")
         result.aborted = True
         return result
+
+    # Only now, with the run committed. Writing output before the prompt is one thing;
+    # deleting a previous run's on the way to a question the user may answer "no" is
+    # another, and a declined run should leave the directory exactly as it found it.
+    stem_by_key = dict(zip(keys, stems, strict=True)) | {paper_key: paper_stem}
+    moved = retarget_reviews(state, stem_by_key, reviews_dir)
+    if moved:
+        state.save(output_dir / STATE_FILE)
+        print(
+            f"[yellow]Renamed {moved} stored review(s) to match the current section order.[/yellow]"
+        )
+
+    live_reviews = {name for entry in state.completed.values() for name in entry.values()}
+    removed = sweep(reviews_dir, live_reviews, ("*.json", f"*{MOVING_SUFFIX}"))
+    removed += sweep(chunks_dir, {f"{stem}.tex" for stem, _ in written}, ("*.tex",))
+    if removed:
+        print(f"[yellow]Removed {len(removed)} stale file(s): {', '.join(removed)}[/yellow]")
 
     print("[bold blue]Starting multi-reviewer analysis...[/bold blue]")
 
