@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from textwrap import indent
 
 import anthropic
 from pydantic import BaseModel
@@ -48,6 +49,12 @@ PROMPTS = ROOT / "prompts"
 
 FINAL_REFEREE_PROMPT = "final_referee.md"
 
+# Sent to every reviewer ahead of its own prompt: the payload map, the shared severity
+# and confidence scales, and the field-by-field output contract. Keeping it in one file
+# is what stops the four rubrics drifting apart, and it makes the system prefix
+# identical across reviewers on the same model, so they share a cache entry.
+REVIEW_PROTOCOL_PROMPT = "review_protocol.md"
+
 # Resume bookkeeping, written alongside the reviews.
 STATE_FILE = "state.json"
 STATE_VERSION = 1
@@ -73,6 +80,11 @@ MAX_INPUT_DEPTH = 10
 # chunk, but only when it holds this much prose beyond the abstract and title.
 FRONT_MATTER_MIN_CHARS = 500
 FRONT_MATTER_NAME = "Front matter"
+
+# Name of the pseudo-chunk handed to paper-scoped reviewers. It carries the whole
+# document, so it goes through the same chunk machinery — files, hashing, resume — as a
+# real section.
+WHOLE_PAPER_NAME = "(whole paper)"
 
 
 CREDENTIALS_HELP = (
@@ -167,6 +179,13 @@ MODEL_SUPPORT: dict[str, ModelSupport] = {
 }
 
 
+class ReviewerScope(StrEnum):
+    """How much of the document a reviewer is shown at once."""
+
+    SECTION = "section"  # one chunk per call, once per section
+    PAPER = "paper"  # the whole source, in a single call
+
+
 @dataclass(frozen=True)
 class ReviewerSpec:
     """Static description of a reviewer, independent of which models are in use."""
@@ -174,6 +193,7 @@ class ReviewerSpec:
     prompt: str  # filename under prompts/
     tier: str  # "strong" or "fast"
     thinking: bool  # whether this reviewer's task benefits from extended thinking
+    scope: ReviewerScope = ReviewerScope.SECTION
 
 
 @dataclass(frozen=True)
@@ -184,6 +204,7 @@ class ReviewerConfig:
     model: str
     prompt_text: str
     thinking: bool
+    scope: ReviewerScope = ReviewerScope.SECTION
 
     @property
     def thinking_config(self) -> anthropic.types.ThinkingConfigParam:
@@ -196,6 +217,14 @@ class LoadedPrompts:
 
     reviewers: dict[str, ReviewerConfig]
     final_referee: str
+    review_protocol: str
+    # The final referee runs on the same model as the strong reviewers. Recorded here
+    # rather than looked up through a reviewer name, which would break on a rename.
+    strong_model: str = DEFAULT_MODEL_STRONG
+
+    def scoped(self, scope: ReviewerScope) -> dict[str, ReviewerConfig]:
+        """The reviewers that run at *scope*, in their declared order."""
+        return {name: r for name, r in self.reviewers.items() if r.scope is scope}
 
 
 @dataclass
@@ -224,11 +253,25 @@ class PipelineResult:
 # judging whether a proof step follows, or building a counterexample, is multi-step
 # reasoning; checking that a symbol was defined or a \ref resolves is scanning and
 # matching, and gains nothing from thinking but costs tokens and latency for it.
+#
+# Scope follows the shape of the question. Whether an inference holds is decidable from
+# the argument in front of you; whether a symbol means the same thing on page 4 as on
+# page 19, or whether the abstract promises what Theorem 1.1 delivers, is not decidable
+# from any one section, and asking a section-scoped reviewer for it only produces guesses
+# the final referee then has to discard. Paper-scoped reviewers run last, so they see
+# every section finding.
+#
+# Insertion order is the order reviewers run in.
 REVIEWER_SPECS: dict[str, ReviewerSpec] = {
     "FormalVerifier": ReviewerSpec("formal_verifier.md", "strong", thinking=True),
     "AdversarialSkeptic": ReviewerSpec("adversarial_skeptic.md", "strong", thinking=True),
-    "NotationAuditor": ReviewerSpec("notation_auditor.md", "fast", thinking=False),
     "ExpositionReferee": ReviewerSpec("exposition_referee.md", "fast", thinking=False),
+    "NotationAuditor": ReviewerSpec(
+        "notation_auditor.md", "fast", thinking=False, scope=ReviewerScope.PAPER
+    ),
+    "ClaimAuditor": ReviewerSpec(
+        "claim_auditor.md", "strong", thinking=True, scope=ReviewerScope.PAPER
+    ),
 }
 
 
@@ -252,10 +295,16 @@ def load_prompts(
             model=models[spec.tier],
             prompt_text=_read_prompt(spec.prompt),
             thinking=spec.thinking,
+            scope=spec.scope,
         )
         for name, spec in REVIEWER_SPECS.items()
     }
-    return LoadedPrompts(reviewers=reviewers, final_referee=_read_prompt(FINAL_REFEREE_PROMPT))
+    return LoadedPrompts(
+        reviewers=reviewers,
+        final_referee=_read_prompt(FINAL_REFEREE_PROMPT),
+        review_protocol=_read_prompt(REVIEW_PROTOCOL_PROMPT),
+        strong_model=strong_model,
+    )
 
 
 def validate_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> None:
@@ -692,12 +741,31 @@ def load_known_issues(issues_file: Path) -> list[IssueWithReviewer]:
 
 
 def _format_issue_full(iss: IssueWithReviewer) -> str:
-    return (
-        f"- **[{iss.reviewer} - {iss.severity.upper()}] {iss.title}**\n"
-        f"  *Location:* {iss.location}\n"
-        f"  *Analysis:* {iss.analysis}\n"
-        f"  *Fix:* {iss.suggested_fix}\n"
-    )
+    """Render one finding for the final referee, carrying every field the reviewer set.
+
+    The quote is what lets the referee honour its instruction to read the source before
+    endorsing a finding — it can search for it — and the confidence is what tells it which
+    findings are claims and which are leads. Dropping either leaves the referee guessing.
+    """
+    parts = [
+        f"- **[{iss.reviewer} - {iss.severity.upper()} - confidence {iss.confidence:.2f}] "
+        f"{iss.title}** ({iss.type})\n",
+        f"  *Location:* {iss.location}\n",
+    ]
+    if iss.quote.strip():
+        # Fenced verbatim rather than inline, so the referee can search the source for it
+        # exactly as the reviewer copied it. LaTeX uses ` as an opening quote, so the
+        # fence has to clear the longest backtick run in the text it wraps.
+        fence = "`" * max(3, _longest_backtick_run(iss.quote) + 1)
+        block = indent("\n".join([fence + "latex", iss.quote, fence]), "  ")
+        parts.append(f"  *Quote:*\n{block}\n")
+    parts.append(f"  *Analysis:* {iss.analysis}\n")
+    parts.append(f"  *Fix:* {iss.suggested_fix}\n")
+    return "".join(parts)
+
+
+def _longest_backtick_run(text: str) -> int:
+    return max((len(run) for run in re.findall(r"`+", text)), default=0)
 
 
 def format_all_issues(issues: list[IssueWithReviewer]) -> str:
@@ -736,32 +804,60 @@ def format_coverage_note(failures: list[ReviewerFailure]) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def _build_system(global_context: str, system_prompt: str) -> list[anthropic.types.TextBlockParam]:
-    """Build the system prompt list with cache breakpoints on both stable blocks."""
-    return [
+def _build_system(
+    global_context: str,
+    system_prompt: str,
+    review_protocol: str | None = None,
+) -> list[anthropic.types.TextBlockParam]:
+    """Build the system prompt list with a cache breakpoint on every stable block.
+
+    The global context and the review protocol are byte-identical across reviewers, so
+    they form a shared prefix: reviewers on the same model read them from one cache entry
+    rather than writing four. The final referee passes *review_protocol* as None — the
+    protocol describes the JSON issue schema, and the referee's contract is markdown.
+    """
+    blocks: list[anthropic.types.TextBlockParam] = [
         {
             "type": "text",
             "text": f"# GLOBAL CONTEXT\n{global_context}",
             "cache_control": {"type": "ephemeral"},
         },
+    ]
+    if review_protocol is not None:
+        blocks.append(
+            {
+                "type": "text",
+                "text": "# REVIEW PROTOCOL\n" + review_protocol,
+                "cache_control": {"type": "ephemeral"},
+            }
+        )
+    blocks.append(
         {
             "type": "text",
             "text": "# REVIEWER PROMPT\n" + system_prompt,
             "cache_control": {"type": "ephemeral"},
-        },
-    ]
-
-
-def _build_messages(known_issues: str, to_review: str) -> list[anthropic.types.MessageParam]:
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"},
-                {"type": "text", "text": to_review},
-            ],
         }
-    ]
+    )
+    return blocks
+
+
+def _build_messages(
+    known_issues: str,
+    to_review: str,
+    preamble: str = "",
+) -> list[anthropic.types.MessageParam]:
+    """Assemble the user turn: an optional preamble, the known issues, then the target.
+
+    The preamble is its own block rather than a prefix on the issue list, so a note about
+    failed reviewer calls is not presented under the `DETECTED ISSUES` heading as though
+    it were a finding.
+    """
+    content: list[anthropic.types.TextBlockParam] = []
+    if preamble:
+        content.append({"type": "text", "text": preamble})
+    content.append({"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"})
+    content.append({"type": "text", "text": to_review})
+    return [{"role": "user", "content": content}]
 
 
 def _api_call_with_schema(
@@ -774,12 +870,13 @@ def _api_call_with_schema(
     max_tokens: int,
     thinking: anthropic.types.ThinkingConfigParam,
     effort: str,
+    review_protocol: str | None = None,
 ):
     # The SDK merges output_format into output_config, so passing both is supported.
     return client.messages.parse(
         model=model,
         max_tokens=max_tokens,
-        system=_build_system(global_context, system_prompt),
+        system=_build_system(global_context, system_prompt, review_protocol),
         messages=_build_messages(known_issues, to_review),
         thinking=thinking,
         output_config={"effort": effort},
@@ -797,12 +894,14 @@ def _api_call(
     max_tokens: int,
     thinking: anthropic.types.ThinkingConfigParam,
     effort: str,
+    review_protocol: str | None = None,
+    preamble: str = "",
 ):
     return client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=_build_system(global_context, system_prompt),
-        messages=_build_messages(known_issues, to_review),
+        system=_build_system(global_context, system_prompt, review_protocol),
+        messages=_build_messages(known_issues, to_review, preamble),
         thinking=thinking,
         output_config={"effort": effort},
     )
@@ -816,18 +915,26 @@ def _count_tokens(
     known_issues: str,
     to_review: str,
     with_schema: bool,
+    review_protocol: str | None = None,
 ) -> int:
     """Return the input-token count for one API call without generating a response."""
     return client.messages.count_tokens(
         model=model,
-        system=_build_system(global_context, system_prompt),
+        system=_build_system(global_context, system_prompt, review_protocol),
         messages=_build_messages(known_issues, to_review),
         output_format=Review if with_schema else anthropic.omit,
     ).input_tokens
 
 
-def _format_section(chunk: Chunk) -> str:
-    """Format a chunk as the 'section under review' block passed to every reviewer prompt."""
+def _format_review_target(chunk: Chunk, scope: ReviewerScope) -> str:
+    """Format the text a reviewer is to read, labelled with how much of the paper it is.
+
+    A paper-scoped reviewer is handed the whole source through the same Chunk machinery,
+    so the heading has to say which it is getting: `SECTION TITLE: (whole paper)` would
+    invite it to treat the document as one section.
+    """
+    if scope is ReviewerScope.PAPER:
+        return f"# FULL PAPER UNDER REVIEW\n\n```latex\n{chunk.content}\n```"
     return (
         f"# SECTION UNDER REVIEW\n\nSECTION TITLE: {chunk.name}\n\n```latex\n{chunk.content}\n```"
     )
@@ -839,10 +946,11 @@ def call_reviewer(
     chunk: Chunk,
     global_context: str,
     known_issues: str,
+    review_protocol: str = "",
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
 ):
-    """Send a section chunk to a reviewer and return its parsed JSON issue report."""
+    """Send a chunk to a reviewer and return its parsed JSON issue report."""
     response = _call_with_retry(
         lambda: _api_call_with_schema(
             client=client,
@@ -850,10 +958,11 @@ def call_reviewer(
             system_prompt=reviewer.prompt_text,
             global_context=global_context,
             known_issues=known_issues,
-            to_review=_format_section(chunk),
+            to_review=_format_review_target(chunk, reviewer.scope),
             max_tokens=max_tokens,
             thinking=reviewer.thinking_config,
             effort=effort,
+            review_protocol=review_protocol,
         )
     )
 
@@ -900,11 +1009,12 @@ def run_final_referee(
             model=model,
             system_prompt=system_prompt,
             global_context=global_context,
-            known_issues=coverage_note + format_all_issues(issues),
+            known_issues=format_all_issues(issues),
             to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
             max_tokens=max_tokens,
             thinking=THINKING_ADAPTIVE,
             effort=effort,
+            preamble=coverage_note,
         )
     )
 
@@ -944,12 +1054,30 @@ def chunk_key(chunk: Chunk) -> str:
     return digest.hexdigest()[:16]
 
 
+def prompts_digest(prompts: LoadedPrompts) -> str:
+    """A hash over every prompt that shapes a reviewer's findings.
+
+    Editing a prompt changes what the reviewer says as surely as changing its model does,
+    so resume has to notice. Without this, a run made before a prompt was rewritten would
+    be silently mixed with one made after, and the report would attribute both to the
+    current prompts.
+    """
+    digest = hashlib.sha256()
+    for name, reviewer in sorted(prompts.reviewers.items()):
+        digest.update(f"{name}\0{reviewer.scope}\0".encode())
+        digest.update(reviewer.prompt_text.encode("utf-8"))
+        digest.update(b"\0")
+    digest.update(prompts.review_protocol.encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
 def run_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> dict:
     """The knobs that change what a reviewer would say, recorded so resume can compare."""
     return {
         "models": {name: r.model for name, r in sorted(prompts.reviewers.items())},
         "max_tokens": max_tokens,
         "effort": effort,
+        "prompts": prompts_digest(prompts),
     }
 
 
@@ -1026,11 +1154,15 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
 
 
 def _describe_settings_change(old: dict, new: dict) -> str:
-    differences = [
-        f"{name}: {old.get(name)!r} -> {new.get(name)!r}"
-        for name in sorted(set(old) | set(new))
-        if old.get(name) != new.get(name)
-    ]
+    differences = []
+    for name in sorted(set(old) | set(new)):
+        if old.get(name) == new.get(name):
+            continue
+        if name == "prompts":
+            # The value is a hash; printing it tells the reader nothing.
+            differences.append("prompts: the reviewer prompts have changed since that run")
+        else:
+            differences.append(f"{name}: {old.get(name)!r} -> {new.get(name)!r}")
     return "; ".join(differences) or "unknown difference"
 
 
@@ -1075,10 +1207,21 @@ def run_pipeline(
     issues_file = output_dir / "issues.jsonl"
     chunks_dir = output_dir / "chunks"
 
+    section_reviewers = prompts.scoped(ReviewerScope.SECTION)
+    paper_reviewers = prompts.scoped(ReviewerScope.PAPER)
+
+    # Paper-scoped reviewers are handed the whole source as one more chunk, so they get
+    # the same identity, storage and resume behaviour as a section without a second
+    # bookkeeping path. It goes last, so they see every section finding.
+    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
+    paper_key = chunk_key(paper_chunk)
+    paper_stem = chunk_stem(len(chunks), paper_chunk)
+
     settings = run_settings(prompts, max_tokens=max_tokens, effort=effort)
     state = load_resume_state(output_dir, settings)
     keys = [chunk_key(chunk) for chunk in chunks]
-    state.prune(set(keys))
+    # The whole-paper key has to be live too, or every resume discards its reviews.
+    state.prune(set(keys) | {paper_key})
 
     output_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(exist_ok=True)
@@ -1087,7 +1230,10 @@ def run_pipeline(
     result = PipelineResult(output_dir=output_dir)
 
     stems = [chunk_stem(index, chunk) for index, chunk in enumerate(chunks)]
-    for stem, chunk in zip(stems, chunks, strict=True):
+    written = list(zip(stems, chunks, strict=True))
+    if paper_reviewers:
+        written.append((paper_stem, paper_chunk))
+    for stem, chunk in written:
         chunk_path = chunks_dir / f"{stem}.tex"
         chunk_path.write_text(chunk.content, encoding="utf-8")
         print(
@@ -1102,8 +1248,10 @@ def run_pipeline(
         f"[gray]{preview}{ellipsis}[/gray]"
     )
 
-    done = sum(state.is_done(key, name) for key in keys for name in prompts.reviewers)
-    pending = len(keys) * len(prompts.reviewers) - done
+    scheduled = [(key, name) for key in keys for name in section_reviewers]
+    scheduled += [(paper_key, name) for name in paper_reviewers]
+    done = sum(state.is_done(key, name) for key, name in scheduled)
+    pending = len(scheduled) - done
     plan = f"[bold]{pending} reviewer call(s) to make"
     if done:
         plan += f", {done} already complete and reused"
@@ -1119,13 +1267,19 @@ def run_pipeline(
     # Rebuilt from the stored reviews rather than from issues.jsonl, so a run that was
     # interrupted between writing a review and appending to the log loses nothing.
     all_issues: list[IssueWithReviewer] = []
-    for key, stem, chunk in zip(keys, stems, chunks, strict=True):
-        if result.fatal_error is not None:
-            break
+
+    def review_chunk(
+        key: str, stem: str, chunk: Chunk, reviewers: dict[str, ReviewerConfig]
+    ) -> None:
+        """Run every reviewer in *reviewers* over *chunk*, recording results and failures.
+
+        Sets ``result.fatal_error`` and returns early when the API says every remaining
+        call would fail the same way.
+        """
         print(f"[bold blue]Reviewing:[/bold blue] {chunk.name}")
         known_issues = summarize_known_issues(all_issues)
 
-        for reviewer_name, reviewer in prompts.reviewers.items():
+        for reviewer_name, reviewer in reviewers.items():
             out_path = reviews_dir / f"{stem}_{reviewer_name}.json"
 
             if state.is_done(key, reviewer_name):
@@ -1147,6 +1301,7 @@ def run_pipeline(
                     chunk=chunk,
                     global_context=global_context,
                     known_issues=known_issues,
+                    review_protocol=prompts.review_protocol,
                     max_tokens=max_tokens,
                     effort=effort,
                 )
@@ -1158,7 +1313,7 @@ def run_pipeline(
                     f"Aborting: {type(exc).__name__} from the API means every remaining "
                     f"call would fail the same way. {exc}"
                 )
-                break
+                return
             except Exception as exc:
                 print(f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]")
                 result.failures.append(
@@ -1179,6 +1334,17 @@ def run_pipeline(
             state.mark(key, reviewer_name, out_path.name)
             state.save(output_dir / STATE_FILE)
             all_issues.extend(attributed_issues)
+
+    for key, stem, chunk in zip(keys, stems, chunks, strict=True):
+        if result.fatal_error is not None:
+            break
+        review_chunk(key, stem, chunk, section_reviewers)
+
+    # Cross-section questions — does this symbol mean the same thing throughout, does the
+    # abstract promise what the theorems deliver — are not answerable from one section,
+    # so their reviewers get the whole source once, after the section passes.
+    if paper_reviewers and result.fatal_error is None:
+        review_chunk(paper_key, paper_stem, paper_chunk, paper_reviewers)
 
     result.issues = all_issues
 
@@ -1214,7 +1380,7 @@ def run_pipeline(
             issues=all_issues,
             global_context=global_context,
             system_prompt=prompts.final_referee,
-            model=prompts.reviewers["FormalVerifier"].model,
+            model=prompts.strong_model,
             max_tokens=max_tokens,
             effort=effort,
             coverage_note=format_coverage_note(result.failures),
@@ -1226,7 +1392,7 @@ def run_pipeline(
             "re-run the same command to retry the synthesis.[/yellow]"
         )
         result.failures.append(
-            ReviewerFailure(section="(whole paper)", reviewer="FinalReferee", error=str(exc))
+            ReviewerFailure(section=WHOLE_PAPER_NAME, reviewer="FinalReferee", error=str(exc))
         )
         return result
 
@@ -1269,22 +1435,31 @@ def run_dry_run(
         token_totals[model] = token_totals.get(model, 0) + tokens
         call_counts[model] = call_counts.get(model, 0) + 1
 
+    def count_reviewer(chunk: Chunk, reviewer: ReviewerConfig) -> None:
+        n = _count_tokens(
+            client,
+            reviewer.model,
+            reviewer.prompt_text,
+            global_context,
+            empty_known_issues,
+            _format_review_target(chunk, reviewer.scope),
+            with_schema=True,
+            review_protocol=prompts.review_protocol,
+        )
+        record(reviewer.model, n)
+        print(f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer.name}[/cyan]: {n:,} input tokens")
+
     for chunk in chunks:
-        for reviewer_name, reviewer in prompts.reviewers.items():
-            n = _count_tokens(
-                client,
-                reviewer.model,
-                reviewer.prompt_text,
-                global_context,
-                empty_known_issues,
-                _format_section(chunk),
-                with_schema=True,
-            )
-            record(reviewer.model, n)
-            print(f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer_name}[/cyan]: {n:,} input tokens")
+        for reviewer in prompts.scoped(ReviewerScope.SECTION).values():
+            count_reviewer(chunk, reviewer)
+
+    # Paper-scoped reviewers read the whole source once, not once per section.
+    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
+    for reviewer in prompts.scoped(ReviewerScope.PAPER).values():
+        count_reviewer(paper_chunk, reviewer)
 
     # The final referee runs on the same model as the strong reviewers.
-    final_model = prompts.reviewers["FormalVerifier"].model
+    final_model = prompts.strong_model
     n = _count_tokens(
         client,
         final_model,
@@ -1337,10 +1512,11 @@ def run_dry_run(
     if unpriced:
         label += ", priced models only"
     print(f"[bold green]{label}: ${input_cost:.2f}[/bold green]")
+    no_thinking = sum(1 for r in prompts.reviewers.values() if not r.thinking)
     print(
         f"[bold green]Max output cost: ${max_output_cost:.2f}[/bold green]  "
         f"(a ceiling nobody reaches: it assumes all {sum(call_counts.values())} calls "
-        f"emit the full {max_tokens:,} output tokens, and two of the four reviewers "
-        "run without thinking)"
+        f"emit the full {max_tokens:,} output tokens, and {no_thinking} of the "
+        f"{len(prompts.reviewers)} reviewers run without thinking)"
     )
     print(f"[bold green]Max total cost: ${input_cost + max_output_cost:.2f}[/bold green]")

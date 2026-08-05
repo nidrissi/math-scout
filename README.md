@@ -3,8 +3,9 @@
 [![CI](https://github.com/nidrissi/llm-reviewer/actions/workflows/ci.yml/badge.svg)](https://github.com/nidrissi/llm-reviewer/actions/workflows/ci.yml)
 
 A multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a
-`.tex` file into sections, runs four specialised Claude-based reviewers over each one,
-and synthesises a final referee report in markdown.
+`.tex` file into sections, runs a set of specialised Claude-based reviewers over them —
+some section by section, some over the whole paper — and synthesises a final referee
+report in markdown.
 
 > **Alpha software.** It works and it is useful, but interfaces, prompts, and output
 > formats will change without notice, and there is no backwards-compatibility promise
@@ -24,17 +25,30 @@ proof checker.
 
 ## Reviewers
 
-| Agent | Tier | Thinks | Role |
-|---|---|---|---|
-| `FormalVerifier` | strong | yes | Proof gaps, invalid inferences, missing hypotheses |
-| `AdversarialSkeptic` | strong | yes | Edge cases, brittle arguments, degenerate examples |
-| `NotationAuditor` | fast | no | Symbol consistency, undefined notation, broken references |
-| `ExpositionReferee` | fast | no | Readability, missing intuition, proof strategy clarity |
+| Agent | Tier | Thinks | Reads | Role |
+|---|---|---|---|---|
+| `FormalVerifier` | strong | yes | a section | Proof gaps, invalid inferences, missing hypotheses, load-bearing computations |
+| `AdversarialSkeptic` | strong | yes | a section | Edge cases, brittle arguments, degenerate examples |
+| `ExpositionReferee` | fast | no | a section | Readability, missing intuition, proof strategy clarity |
+| `NotationAuditor` | fast | no | the whole paper | Symbol consistency, convention drift, broken references |
+| `ClaimAuditor` | strong | yes | the whole paper | Overclaiming: what the abstract promises against what the theorems prove |
 
 Each reviewer returns structured JSON issues (`title`, `severity`, `type`, `location`,
 `quote`, `analysis`, `suggested_fix`, `confidence`). A final referee pass then synthesises
 all of them into one report. Non-mathematical sections (References, Bibliography,
 Acknowledgments) are skipped automatically.
+
+Scope follows the shape of the question. Whether an inference holds is decidable from the
+argument in front of you, so those reviewers work section by section. Whether a symbol
+means the same thing on page 4 as on page 19, or whether the abstract promises what
+Theorem 1.1 delivers, is not decidable from any one section — asking a section-scoped
+reviewer for it only produces guesses the final referee then has to discard. Those two
+read the whole source, once, after the section passes, so they also see everything the
+section reviewers found.
+
+Every reviewer is sent a shared `review_protocol.md` ahead of its own prompt: one
+severity scale, one confidence scale, and one description of what each output field must
+contain. Individual prompts hold only their lane and what they must leave to others.
 
 Extended thinking is enabled per reviewer, on the shape of the task rather than the tier.
 Deciding whether a proof step actually follows, or building a counterexample, is multi-step
@@ -84,9 +98,10 @@ Don't pass the key inline on the command line — it ends up in your shell histo
 
 ## Cost
 
-**Start with `--dry-run`.** A full review makes one API call per section per reviewer,
-plus one whole-paper call at the end, and reads the entire paper each time. On a long
-paper that adds up to real money.
+**Start with `--dry-run`.** A full review makes one API call per section per
+section-scoped reviewer, one whole-paper call for each paper-scoped reviewer, and one
+final referee call. Every one of them reads at least a section and several read the whole
+paper, so on a long paper it adds up to real money.
 
 ```bash
 llm-reviewer paper.tex --dry-run
@@ -186,8 +201,8 @@ Everything lands in the output directory (default `<input_dir>/review/`):
 | File | Contents |
 |---|---|
 | `final_report.md` | The final referee report — start here |
-| `chunks/NN_<section>.tex` | The exact LaTeX each reviewer saw |
-| `reviews/NN_<section>_<reviewer>.json` | Raw JSON from each reviewer per section |
+| `chunks/NN_<section>.tex` | The exact LaTeX each reviewer saw, including the whole-paper chunk |
+| `reviews/NN_<section>_<reviewer>.json` | Raw JSON from each reviewer per chunk |
 | `all_issues.json` | Every issue behind the current report, as a JSON array |
 | `issues.jsonl` | Append-only log of every issue ever produced here, one per line |
 | `state.json` | Resume bookkeeping — which reviews are complete, and under what settings |
@@ -202,12 +217,16 @@ findings as complete.
 ## Known limitations
 
 - **Sequential.** Reviewers run one at a time, because each pass is shown the issues found
-  so far. A ten-section paper is over forty serial API calls, so expect it to be slow.
+  so far. A ten-section paper is over thirty serial API calls, so expect it to be slow.
 - **`\section` only.** Documents structured with `\chapter`, or with no sectioning at all,
   produce nothing to review and exit with an error.
-- **Reviewers only see one section at a time**, plus a shared global context (title,
-  abstract, preamble, first 15 theorems/definitions). Errors that only appear when two
-  distant sections are read together are likely to be missed.
+- **Three of the five reviewers see one section at a time**, plus a shared global context
+  (title, abstract, preamble, first 15 theorems/definitions). An error that only shows up
+  when two distant sections are read together will be caught only if it falls in the
+  notation or overclaiming lanes, which are the two that read the whole paper.
+- **No access to the literature.** Nothing here can read a reference, so the report never
+  says a result is already known. Novelty is assessed only against what the paper itself
+  claims and cites; genuine prior-art judgement remains entirely yours.
 - **`\input` is confined to the document's own directory.** A reference pointing outside
   it — an absolute path, or `../` climbing out — is refused with a warning rather than
   inlined, since running this on a paper from someone else would otherwise let the file
