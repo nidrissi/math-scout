@@ -108,7 +108,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         # Free pre-flight: proves the credentials work and the model IDs are real
         # before the run writes anything or asks the user to approve spending.
-        check_access(client, [r.model for r in prompts.reviewers.values()])
+        models = [r.model for r in prompts.reviewers.values()]
+        # The final referee's model too, in case no reviewer happens to share it.
+        check_access(client, [*models, prompts.strong_model])
     except ConfigurationError as exc:
         print(f"[red]{exc}[/red]")
         return EXIT_CONFIG

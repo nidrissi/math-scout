@@ -5,6 +5,59 @@ All notable changes to this project are documented here. The format is based on
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — with the caveat that before
 1.0 anything may change between releases.
 
+## [Unreleased]
+
+Prompt audit: the reviewer set, the prompts, and the plumbing between them.
+
+**This invalidates existing output directories.** `run_settings` now records a hash of the
+prompt text, so a `review/` produced before this change is refused rather than mixed with
+findings from the new prompts. Delete it, or pass a different `--output`.
+
+### Added
+
+- `ClaimAuditor`, a fifth reviewer, reading the whole paper: it compares what the abstract
+  and introduction promise against what the theorems actually state and prove. Nothing
+  previously checked for overclaiming, and the recommendation was purely defect-driven —
+  a correct but unremarkable paper scored **Accept**.
+- `prompts/review_protocol.md`, sent to every reviewer ahead of its own prompt. It holds
+  one severity scale, one confidence scale, and one field-by-field description of the
+  output schema. The four prompts previously carried their own copies, which had drifted,
+  and which fed a single filter in the final referee as though they were comparable.
+- A reviewer `scope`: `NotationAuditor` now reads the whole paper in one pass instead of
+  each section separately. Consistency is a relation between two occurrences, and it could
+  previously see only one of them; its own prompt told it to hedge with "appears to", and
+  the final referee had a rule for discarding the false positives that produced. On a
+  multi-section paper this is also fewer calls than before.
+- A `# Questions for the authors` section in the report, so a low-confidence finding has
+  somewhere to go other than being inflated into a main concern or dropped.
+- Explicit instructions, in three separate prompts, never to assert prior art: nothing
+  here can read a reference, so a claim that a result is already known would be invented.
+
+### Fixed
+
+- Every reviewer prompt told the model to skip concerns already in a `KNOWN ISSUES` block.
+  No such block was ever sent — the pipeline sends `DETECTED ISSUES` — so the
+  de-duplication instruction had never once fired.
+- `type`, `quote` and `confidence` were collected from every reviewer, written to
+  `reviews/*.json`, and then dropped before the final referee saw anything. Four prompts
+  were calibrating a confidence score that reached nothing. All three now reach the report,
+  and the referee is told how to use them: the quote to check a finding against the source,
+  the confidence to tell a demonstrated defect from a lead.
+- The final referee prompt described its input as "deduplicated issues". They were never
+  deduplicated. It now says so, and deduplicating is stated as its job.
+- The `COVERAGE GAPS` note about failed reviewer calls was concatenated onto the front of
+  the issue list, so it appeared under the `DETECTED ISSUES` heading as though it were a
+  finding. It is now its own message block.
+- Nothing checked arithmetic: `FormalVerifier` was told not to look for algebraic mistakes
+  and no other reviewer covered them. It now works through computations the argument rests
+  on, while still leaving routine algebra alone.
+- Reviewers are now told what they can and cannot see, including that the `## Theorem N`
+  headings in the global context are extraction indices rather than the paper's own
+  numbering — a reviewer citing "Theorem 3" could mean neither.
+- `ExpositionReferee` findings are capped at `major` and routed to the report's exposition
+  section. A hard-to-follow proof was previously able to enter Main concerns beside a
+  theorem that does not hold.
+
 ## [0.1.0a1] — 2026-08-03
 
 First public release. Everything before this lived only in the author's working tree.
