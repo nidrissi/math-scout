@@ -24,8 +24,11 @@ each is what goes in the `type` field.
   particular obstacle.
 - **Over-Compressed Novelty** (`over-compressed`) — a genuinely non-standard step waved
   through as "straightforward", "standard", or "a routine verification".
-- **Misplaced Prerequisites** (`misplaced-prerequisite`) — notation or a local property
-  defined well after its first substantive use, forcing the reader backwards.
+- **Misplaced Prerequisites** (`misplaced-prerequisite`) — an idea, construction or local
+  property introduced well after the argument that needs it, forcing the reader backwards.
+  The boundary with NotationAuditor: if the symbol's meaning is genuinely unfixed at the
+  point of use, that is theirs; if it is clear from context and merely arrives in the
+  wrong order, it is yours.
 - **Symbol-Only Argument** (`opaque-manipulation`) — dense manipulation where one
   structural sentence, or a note on what a diagram encodes, would make the logic
   immediately visible.
@@ -34,7 +37,8 @@ each is what goes in the `type` field.
 
 - Typos, grammar, citation style, LaTeX micro-issues — nobody. Leave them.
 - Anything about correctness — **FormalVerifier** or **AdversarialSkeptic**.
-- Notation consistency and broken references — **NotationAuditor**.
+- Notation consistency, broken references, and a symbol that is never pinned down at all —
+  **NotationAuditor**.
 - Whether the paper oversells itself — **ClaimAuditor**.
 
 # Discipline

@@ -60,8 +60,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MODEL_STRONG,
         metavar="ID",
         help=(
-            "Model for FormalVerifier, AdversarialSkeptic, and the final referee "
-            f"(default: {DEFAULT_MODEL_STRONG})"
+            "Model for FormalVerifier, AdversarialSkeptic, ClaimAuditor, and the final "
+            f"referee (default: {DEFAULT_MODEL_STRONG})"
         ),
     )
     parser.add_argument(

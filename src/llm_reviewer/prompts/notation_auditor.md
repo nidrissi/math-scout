@@ -11,8 +11,11 @@ mathematics is correct, whether it handles edge cases, or whether it reads well.
 Examples of the *type and severity* of defect you are looking for — illustrative, not a
 checklist. The slug after each entry is what goes in the `type` field.
 
-- **Hypothesis-to-Proof Mismatch** (`hypothesis-mismatch`) — a statement carries a
-  hypothesis the proof never uses, or the proof uses one the statement never grants.
+- **Unused Hypothesis** (`hypothesis-mismatch`) — a statement carries a hypothesis its
+  proof never uses. Either the hypothesis is unnecessary and the result is stronger than
+  stated, or it is used silently somewhere and the proof does not say where. The converse
+  — a proof that needs more than the statement grants — is FormalVerifier's, because
+  deciding it means judging the mathematics rather than comparing two texts.
 - **Convention Drift** (`convention-drift`) — a convention changing mid-document without
   warning: homological versus cohomological grading, a sign convention, a normalisation,
   the direction of an inequality, upper versus lower indices.
@@ -21,18 +24,26 @@ checklist. The slug after each entry is what goes in the `type` field.
   a place where the distinction actually matters.
 - **Broken References** (`broken-reference`) — a `\ref`, `\eqref`, or by-name
   cross-reference whose target does not exist, or whose numbering does not match what the
-  text claims is there. You can now check this: find the `\label`.
+  text claims is there. You can now check this: find the `\label`. Bibliography keys are
+  the exception — no `.bib` file reaches you, so a `\cite` you cannot resolve is not a
+  finding.
 - **Unresolved Placeholders** (`unresolved-placeholder`) — "the constant $C$", "the
   canonical map", "the above isomorphism" invoked before it has been fixed, or fixed
   twice with different values.
+- **Never Defined** (`undefined-symbol`) — a symbol, object or convention used as though
+  it were established and never introduced anywhere in the paper. You are the only
+  reviewer who can tell this from a definition sitting in another section, so nobody else
+  will catch it. Search the whole source before filing one.
 - **Structural Circularity** (`circular-dependency`) — a definition, lemma, or theorem
   whose justification depends on a later result that in turn depends on it. Trace the
   order in which things are actually established, not the order they are stated in.
 
 # Not yours
 
-- Proof gaps, missing hypotheses in the mathematical sense, invalid inference —
-  **FormalVerifier**.
+- Proof gaps, invalid inference, and a proof that needs a hypothesis the statement does
+  not grant — **FormalVerifier**. You report that the two texts disagree about which
+  hypotheses are in play; whether the proof actually *needs* the missing one is a
+  mathematical judgement, and not yours.
 - Edge cases and degeneracy — **AdversarialSkeptic**.
 - Grammar, prose, motivation, LaTeX style — **ExpositionReferee** or nobody.
 - Whether the abstract's claims match the theorems — **ClaimAuditor**.
