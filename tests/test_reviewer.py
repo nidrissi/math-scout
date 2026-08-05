@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 from collections import Counter
+from dataclasses import replace
 from types import SimpleNamespace
 
 import anthropic
@@ -25,12 +26,16 @@ from llm_reviewer.reviewer import (
     MODEL_PRICING,
     MODEL_SUPPORT,
     REVIEWER_SPECS,
+    WHOLE_PAPER_NAME,
     Chunk,
     ConfigurationError,
     Issue,
     IssueWithReviewer,
     Review,
+    ReviewerScope,
     SeverityLevel,
+    _build_system,
+    _format_issue_full,
     _safe_filename,
     call_reviewer,
     check_access,
@@ -42,6 +47,8 @@ from llm_reviewer.reviewer import (
     load_prompts,
     mask_non_content,
     resolve_inputs,
+    run_dry_run,
+    run_final_referee,
     run_pipeline,
     strip_comment,
     summarize_known_issues,
@@ -297,6 +304,31 @@ def test_load_known_issues_reports_a_corrupt_line(tmp_path):
         load_known_issues(path)
 
 
+def test_the_final_referee_is_given_the_quote_and_the_confidence():
+    """Both used to be collected, stored, and then dropped before the report was written.
+
+    Without the quote the referee cannot check a finding against the source, and without
+    the confidence it cannot tell a demonstrated defect from a lead.
+    """
+    rendered = _format_issue_full(
+        issue("major", "Bad step").model_copy(
+            update={"quote": "\\begin{align}\n  x = y\n\\end{align}"}
+        )
+    )
+    assert "\\begin{align}" in rendered
+    assert "x = y" in rendered
+    assert "confidence 0.50" in rendered
+    assert "(logic)" in rendered  # the type slug, for grouping
+
+
+def test_a_quote_containing_a_backtick_does_not_break_out_of_its_fence():
+    """LaTeX uses ` as an opening quote, so a three-backtick fence is not always enough."""
+    rendered = _format_issue_full(
+        issue("minor").model_copy(update={"quote": "``quoted'' and ```three```"})
+    )
+    assert "````latex" in rendered
+
+
 def test_format_coverage_note_is_empty_without_failures():
     assert format_coverage_note([]) == ""
 
@@ -344,7 +376,19 @@ class FakeClient:
         self.issues_per_call = issues_per_call
         self.models_probed: list[str] = []
         self.parse_calls: list[dict] = []
+        self.create_calls: list[dict] = []
         self.messages = self
+
+    def create(self, **kwargs):
+        """The unstructured call, used only by the final referee."""
+        _assert_sdk_accepts("create", kwargs)
+        self.create_calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="# Summary\n\nreport")],
+            stop_reason=self.stop_reason,
+        )
 
     def count_tokens(self, **kwargs):
         _assert_sdk_accepts("count_tokens", kwargs)
@@ -360,8 +404,13 @@ class FakeClient:
             raise self.error
         if self.stop_reason == "max_tokens":
             return FakeParsed(None, stop_reason="max_tokens")
+        target = kwargs["messages"][0]["content"][1]["text"]
+        # Paper-scoped reviewers are handed the whole source, which carries no section
+        # title; their findings are attributed to the document instead.
         location = (
-            kwargs["messages"][0]["content"][1]["text"].split("SECTION TITLE: ")[1].split("\n")[0]
+            target.split("SECTION TITLE: ")[1].split("\n")[0]
+            if "SECTION TITLE: " in target
+            else WHOLE_PAPER_NAME
         )
         issues = [
             Issue(
@@ -427,8 +476,10 @@ def test_load_prompts_reads_every_prompt_including_the_final_referee():
         "AdversarialSkeptic",
         "NotationAuditor",
         "ExpositionReferee",
+        "ClaimAuditor",
     }
     assert prompts.final_referee.strip()
+    assert prompts.review_protocol.strip()
     assert all(r.prompt_text.strip() for r in prompts.reviewers.values())
 
 
@@ -436,8 +487,69 @@ def test_load_prompts_applies_the_requested_models():
     prompts = load_prompts(strong_model="strong-x", fast_model="fast-y")
     assert prompts.reviewers["FormalVerifier"].model == "strong-x"
     assert prompts.reviewers["AdversarialSkeptic"].model == "strong-x"
+    assert prompts.reviewers["ClaimAuditor"].model == "strong-x"
     assert prompts.reviewers["NotationAuditor"].model == "fast-y"
     assert prompts.reviewers["ExpositionReferee"].model == "fast-y"
+    assert prompts.strong_model == "strong-x"
+
+
+def test_every_reviewer_prompt_names_the_issue_block_the_pipeline_actually_sends():
+    """The prompts used to point at a `KNOWN ISSUES` block that was never built."""
+    prompts = load_prompts()
+    texts = [r.prompt_text for r in prompts.reviewers.values()]
+    texts += [prompts.review_protocol, prompts.final_referee]
+    assert any("DETECTED ISSUES" in text for text in texts)
+    assert not any("KNOWN ISSUES" in text for text in texts)
+
+
+def test_the_review_protocol_is_its_own_cached_system_block():
+    blocks = _build_system("ctx", "lane", "protocol")
+    assert [b["text"] for b in blocks] == [
+        "# GLOBAL CONTEXT\nctx",
+        "# REVIEW PROTOCOL\nprotocol",
+        "# REVIEWER PROMPT\nlane",
+    ]
+    # Every block is a cache breakpoint, and the first two are identical across
+    # reviewers, so reviewers on one model share a prefix instead of writing their own.
+    assert all(b["cache_control"] == {"type": "ephemeral"} for b in blocks)
+
+
+def test_the_final_referee_gets_no_review_protocol():
+    """It writes markdown; the protocol describes the JSON issue schema."""
+    blocks = _build_system("ctx", "referee")
+    assert [b["text"] for b in blocks] == ["# GLOBAL CONTEXT\nctx", "# REVIEWER PROMPT\nreferee"]
+
+
+# ----------------------------------------------------------------------------- scope
+
+
+def test_cross_section_reviewers_read_the_whole_paper():
+    scopes = {name: spec.scope for name, spec in REVIEWER_SPECS.items()}
+    assert scopes == {
+        "FormalVerifier": ReviewerScope.SECTION,
+        "AdversarialSkeptic": ReviewerScope.SECTION,
+        "ExpositionReferee": ReviewerScope.SECTION,
+        # Consistency and overclaiming are both properties of two places in the
+        # document, so neither is decidable from a single section.
+        "NotationAuditor": ReviewerScope.PAPER,
+        "ClaimAuditor": ReviewerScope.PAPER,
+    }
+
+
+def test_paper_scoped_reviewers_are_not_told_they_are_reading_a_section():
+    client = FakeClient()
+    prompts = load_prompts()
+    call_reviewer(
+        client=client,
+        reviewer=prompts.reviewers["NotationAuditor"],
+        chunk=Chunk(WHOLE_PAPER_NAME, "whole source"),
+        global_context="ctx",
+        known_issues="none",
+    )
+    (sent,) = client.parse_calls
+    target = sent["messages"][0]["content"][1]["text"]
+    assert target.startswith("# FULL PAPER UNDER REVIEW")
+    assert "SECTION TITLE" not in target
 
 
 # --------------------------------------------------------------------------- defaults
@@ -466,6 +578,7 @@ def test_thinking_is_enabled_for_the_deductive_reviewers_only():
     assert thinking == {
         "FormalVerifier": True,
         "AdversarialSkeptic": True,
+        "ClaimAuditor": True,
         "NotationAuditor": False,
         "ExpositionReferee": False,
     }
@@ -712,17 +825,33 @@ def review(tmp_path, tex: str, **kwargs):
 
 THREE = (("Alpha", "aaa"), ("Beta", "bbb"), ("Gamma", "ggg"))
 
+# Three sections seen by each of the three section-scoped reviewers, plus one pass over
+# the whole source by each of the two paper-scoped ones.
+SECTION_CALLS = 3
+PAPER_CALLS = 2
+THREE_CALLS = 3 * SECTION_CALLS + PAPER_CALLS
+
 
 def test_resume_makes_no_calls_and_no_duplicates_when_nothing_changed(tmp_path):
     tex = sections(*THREE)
     first, r1 = review(tmp_path, tex)
-    assert len(first.parse_calls) == 12
-    assert len(r1.issues) == 12
+    assert len(first.parse_calls) == THREE_CALLS
+    assert len(r1.issues) == THREE_CALLS
 
     second, r2 = review(tmp_path, tex)
     assert second.parse_calls == []
-    assert len(r2.issues) == 12
+    assert len(r2.issues) == THREE_CALLS
     assert Counter(i.location for i in r2.issues) == Counter(i.location for i in r1.issues)
+
+
+def test_the_whole_paper_pass_runs_once_and_survives_a_resume(tmp_path):
+    """Its key is not one of the section keys, so prune() has to be told about it."""
+    _, first = review(tmp_path, sections(*THREE))
+    assert sum(i.location == WHOLE_PAPER_NAME for i in first.issues) == PAPER_CALLS
+
+    client, again = review(tmp_path, sections(*THREE))
+    assert client.parse_calls == []
+    assert sum(i.location == WHOLE_PAPER_NAME for i in again.issues) == PAPER_CALLS
 
 
 def test_resume_reviews_only_the_new_chunk_when_one_is_inserted(tmp_path):
@@ -731,19 +860,41 @@ def test_resume_reviews_only_the_new_chunk_when_one_is_inserted(tmp_path):
     review(tmp_path, sections(*THREE))
     client, result = review(tmp_path, sections(*THREE, front="Intro prose. " * 60))
 
-    assert len(client.parse_calls) == 4  # the new Front matter chunk only
-    assert len(result.issues) == 16
-    assert max(Counter(i.location for i in result.issues).values()) == 4
+    # The new Front matter chunk, plus the whole-paper pass: the source changed, so its
+    # key changed too, and the sections either side of the insertion are untouched.
+    assert len(client.parse_calls) == SECTION_CALLS + PAPER_CALLS
+    assert len(result.issues) == 4 * SECTION_CALLS + PAPER_CALLS
+    assert max(Counter(i.location for i in result.issues).values()) == SECTION_CALLS
 
 
 def test_resume_re_reviews_a_chunk_whose_text_changed(tmp_path):
     review(tmp_path, sections(*THREE))
     client, result = review(tmp_path, sections(("Alpha", "REWRITTEN"), *THREE[1:]))
 
-    assert len(client.parse_calls) == 4
+    assert len(client.parse_calls) == SECTION_CALLS + PAPER_CALLS
     reviewed = [c["messages"][0]["content"][1]["text"] for c in client.parse_calls]
     assert all("REWRITTEN" in text for text in reviewed)
-    assert len(result.issues) == 12
+    assert len(result.issues) == THREE_CALLS
+
+
+def test_resume_refuses_when_a_reviewer_prompt_changed(tmp_path):
+    """Editing a prompt changes the findings as surely as changing the model does."""
+    review(tmp_path, sections(*THREE))
+
+    edited = load_prompts()
+    verifier = edited.reviewers["FormalVerifier"]
+    edited.reviewers["FormalVerifier"] = replace(
+        verifier, prompt_text=verifier.prompt_text + "\nAlso flag split infinitives.\n"
+    )
+
+    with pytest.raises(ConfigurationError, match="the reviewer prompts have changed"):
+        run_pipeline(
+            FakeClient(issues_per_call=1),
+            str(tmp_path / "paper.tex"),
+            tmp_path / "out",
+            prompts=edited,
+            assume_yes=True,
+        )
 
 
 def test_resume_refuses_when_the_models_changed(tmp_path):
@@ -767,7 +918,7 @@ def test_resume_recovers_issues_lost_from_the_append_only_log(tmp_path):
 
     client, result = review(tmp_path, sections(*THREE))
     assert client.parse_calls == []
-    assert len(result.issues) == 12
+    assert len(result.issues) == THREE_CALLS
 
 
 def test_resume_re_runs_a_reviewer_whose_stored_review_is_corrupt(tmp_path):
@@ -777,7 +928,43 @@ def test_resume_re_runs_a_reviewer_whose_stored_review_is_corrupt(tmp_path):
 
     client, result = review(tmp_path, sections(*THREE))
     assert len(client.parse_calls) == 1
-    assert len(result.issues) == 12
+    assert len(result.issues) == THREE_CALLS
+
+
+def test_the_coverage_note_is_not_filed_under_detected_issues(tmp_path):
+    """It reports failed reviewer calls; nested in the issue list it reads as a finding."""
+    report = run_final_referee(
+        client := FakeClient(),
+        tex="\\section{One}\nx\n",
+        issues=[issue("major")],
+        global_context="ctx",
+        system_prompt="referee",
+        model="strong",
+        coverage_note=format_coverage_note([Failure("Intro", "FormalVerifier", "boom")]),
+    )
+    assert report.startswith("# Summary")
+
+    (sent,) = client.create_calls
+    blocks = [b["text"] for b in sent["messages"][0]["content"]]
+    assert "COVERAGE GAPS" in blocks[0]
+    assert blocks[1].startswith("# DETECTED ISSUES")
+    assert "COVERAGE GAPS" not in blocks[1]
+    assert blocks[2].startswith("# FULL PAPER")
+
+
+def test_dry_run_counts_the_paper_reviewers_once_not_once_per_section(tmp_path, capsys):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(*THREE), encoding="utf-8")
+    client = FakeClient()
+
+    run_dry_run(client, str(source), prompts=load_prompts())
+
+    out = capsys.readouterr().out
+    for name in ("NotationAuditor", "ClaimAuditor"):
+        assert out.count(name) == 1
+    assert out.count("FormalVerifier") == 3
+    # Three sections x three section reviewers, two paper passes, one final referee.
+    assert len(client.models_probed) == THREE_CALLS + 1
 
 
 def test_reviews_without_a_state_file_are_refused_rather_than_ignored(tmp_path):
