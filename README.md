@@ -30,7 +30,7 @@ proof checker.
 | `FormalVerifier` | strong | yes | a section | Proof gaps, invalid inferences, missing hypotheses, load-bearing computations |
 | `AdversarialSkeptic` | strong | yes | a section | Edge cases, brittle arguments, degenerate examples |
 | `ExpositionReferee` | fast | no | a section | Readability, missing intuition, proof strategy clarity |
-| `NotationAuditor` | fast | no | the whole paper | Symbol consistency, convention drift, broken references |
+| `NotationAuditor` | fast | yes | the whole paper | Symbol consistency, convention drift, broken references |
 | `ClaimAuditor` | strong | yes | the whole paper | Overclaiming: what the abstract promises against what the theorems prove |
 
 Each reviewer returns structured JSON issues (`title`, `severity`, `type`, `location`,
