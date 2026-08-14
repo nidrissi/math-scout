@@ -1204,25 +1204,41 @@ def retarget_reviews(state: ResumeState, stems: dict[str, str], reviews_dir: Pat
     and the run repeats. That costs one call and loses nothing, the same trade the rest
     of the resume bookkeeping makes.
     """
-    moves = [
-        (key, reviewer, stored, f"{stems[key]}_{reviewer}.json")
-        for key, reviewers in state.completed.items()
-        if key in stems
-        for reviewer, stored in reviewers.items()
-    ]
-    moves = [m for m in moves if m[2] != m[3] and (reviews_dir / m[2]).is_file()]
-    if not moves:
+    planned: list[tuple[str, str, str, str]] = []
+    for key, reviewers in state.completed.items():
+        if key not in stems:
+            continue
+        for reviewer, stored in reviewers.items():
+            wanted = f"{stems[key]}_{reviewer}.json"
+            if stored == wanted:
+                continue
+
+            stored_path = reviews_dir / stored
+            moving_path = reviews_dir / (stored + MOVING_SUFFIX)
+            wanted_path = reviews_dir / wanted
+
+            if stored_path.is_file() or moving_path.is_file():
+                planned.append((key, reviewer, stored, wanted))
+            elif wanted_path.is_file():
+                # Rename finished previously but state.json was not saved.
+                state.completed[key][reviewer] = wanted
+
+    if not planned:
         return 0
 
-    # Two phases. One rename's target can be another's source — two sections sharing a
-    # title but not a body get the same safe name and different keys, so swapping their
-    # positions makes the moves collide — and a direct move would overwrite a live file.
-    for _, _, stored, _ in moves:
-        (reviews_dir / stored).replace(reviews_dir / (stored + MOVING_SUFFIX))
-    for key, reviewer, stored, wanted in moves:
-        (reviews_dir / (stored + MOVING_SUFFIX)).replace(reviews_dir / wanted)
+    # Two phases. One rename's target can be another's source, so avoid clobbering.
+    for _, _, stored, _ in planned:
+        stored_path = reviews_dir / stored
+        if stored_path.is_file():
+            stored_path.replace(reviews_dir / (stored + MOVING_SUFFIX))
+
+    for key, reviewer, stored, wanted in planned:
+        moving_path = reviews_dir / (stored + MOVING_SUFFIX)
+        if moving_path.is_file():
+            moving_path.replace(reviews_dir / wanted)
         state.completed[key][reviewer] = wanted
-    return len(moves)
+
+    return len(planned)
 
 
 def sweep(directory: Path, live: set[str], patterns: tuple[str, ...]) -> list[str]:
