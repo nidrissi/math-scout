@@ -7,7 +7,30 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.1.0a2] — 2026-08-16
+
+**This invalidates existing output directories**, on two counts: the `--max-tokens`
+default has changed, and the reviewer prompts have (see the prompt audit below). Both are
+part of the settings a resume is keyed on. Delete `review/`, or pass a different
+`--output`.
+
 ### Fixed
+
+- Reviewers ran out of output budget mid-answer on ordinary sections and the whole run
+  degraded. On one 100k-character paper, 11 of 23 reviewer calls and the final referee
+  were cut off before finishing their JSON, and the report was synthesised from partial
+  coverage. Truncated calls are billed in full and return nothing usable, so roughly 60%
+  of that run's spend bought discarded tokens.
+
+  The cause was `max_tokens`, which thinking and the response share, pinned at 16000
+  because every call was non-streaming — the SDK refuses a non-streaming request
+  estimated to run past ten minutes, which capped the budget at 21333. Every generation
+  call now streams, so the cap is the model's own output limit instead. This is why
+  raising the default is not a cost increase: unused budget is never billed, so the old
+  cap was *causing* the spend rather than limiting it.
+
+  Only the reviewer with thinking disabled was unaffected, on every section size — which
+  is what identified thinking as what the budget was going to.
 
 - `chunks/` and `reviews/` accumulated files from earlier runs. Nothing removed them, and
   a reused review kept the filename it was first written under, so after inserting or
@@ -18,6 +41,18 @@ All notable changes to this project are documented here. The format is based on
   the rename is bookkeeping, not a re-review.
 - The chunk index is three digits, so the prefix still sorts past a hundred sections.
   Existing output directories rename themselves on the next run.
+
+### Changed
+
+- `--max-tokens` defaults to 32000 (was 16000) and accepts up to 64000 (was 21333). Every
+  supported model allows at least 64K output tokens; the Opus 5 and Sonnet 5 families
+  allow 128K.
+- A call that exhausts its budget is retried once at one `--effort` level down, trading
+  some depth on that section for producing a review at all. A second truncation is
+  reported as a failed call and the run continues, as before.
+- `--dry-run` prints two output ceilings rather than one: assuming no call truncates, and
+  assuming every call truncates and is retried. The single figure it printed before stopped
+  being an upper bound once a call could bill two attempts.
 
 Prompt audit: the reviewer set, the prompts, and the plumbing between them.
 
@@ -177,4 +212,5 @@ First public release. Everything before this lived only in the author's working 
 - The unused `RapidFuzz` dependency, and `.github/requirements.txt` in favour of
   `pyproject.toml`.
 
+[0.1.0a2]: https://github.com/nidrissi/llm-reviewer/releases/tag/v0.1.0a2
 [0.1.0a1]: https://github.com/nidrissi/llm-reviewer/releases/tag/v0.1.0a1

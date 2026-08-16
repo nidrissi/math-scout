@@ -16,7 +16,7 @@ from .reviewer import (
     DEFAULT_MODEL_FAST,
     DEFAULT_MODEL_STRONG,
     EFFORT_LEVELS,
-    MAX_NONSTREAMING_TOKENS,
+    MAX_OUTPUT_TOKENS,
     ConfigurationError,
     check_access,
     load_prompts,
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             "Output token limit per call, covering thinking and response text together "
-            f"(default: {DEFAULT_MAX_TOKENS}, maximum {MAX_NONSTREAMING_TOKENS})"
+            f"(default: {DEFAULT_MAX_TOKENS}, maximum {MAX_OUTPUT_TOKENS})"
         ),
     )
     parser.add_argument(

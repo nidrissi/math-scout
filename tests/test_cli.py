@@ -13,7 +13,7 @@ from llm_reviewer.reviewer import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL_FAST,
     DEFAULT_MODEL_STRONG,
-    MAX_NONSTREAMING_TOKENS,
+    MAX_OUTPUT_TOKENS,
     ConfigurationError,
     PipelineResult,
     ReviewerFailure,
@@ -111,7 +111,7 @@ def test_interrupt_exits_one_and_says_how_to_resume(paper, monkeypatch, capsys):
 # ------------------------------------------------------------------- settings validation
 
 
-@pytest.mark.parametrize("value", ["0", "-1", str(MAX_NONSTREAMING_TOKENS + 1)])
+@pytest.mark.parametrize("value", ["0", "-1", str(MAX_OUTPUT_TOKENS + 1)])
 def test_out_of_range_max_tokens_exits_two(paper, monkeypatch, value):
     code = run([str(paper), "--max-tokens", value], monkeypatch)
     assert code == cli.EXIT_CONFIG
@@ -119,9 +119,7 @@ def test_out_of_range_max_tokens_exits_two(paper, monkeypatch, value):
 
 def test_max_tokens_at_the_ceiling_is_accepted(paper, monkeypatch, tmp_path):
     result = PipelineResult(output_dir=tmp_path)
-    code = run(
-        [str(paper), "--max-tokens", str(MAX_NONSTREAMING_TOKENS)], monkeypatch, result=result
-    )
+    code = run([str(paper), "--max-tokens", str(MAX_OUTPUT_TOKENS)], monkeypatch, result=result)
     assert code == cli.EXIT_OK
 
 
