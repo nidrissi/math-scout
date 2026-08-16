@@ -17,11 +17,23 @@ from rich import print
 DEFAULT_MODEL_STRONG = "claude-opus-5"
 DEFAULT_MODEL_FAST = "claude-sonnet-5"
 
-# The SDK refuses a non-streaming request whose estimated duration exceeds ten minutes,
-# which works out at max_tokens > 21_333 (see _calculate_nonstreaming_timeout in
-# anthropic/_base_client.py). Staying under that keeps every call non-streaming.
-MAX_NONSTREAMING_TOKENS = 21_333
-DEFAULT_MAX_TOKENS = 16_000
+# Every call streams, so `max_tokens` is bounded by what the model will emit rather than
+# by the SDK's ten-minute non-streaming timeout (which capped it at 21_333). Every model
+# in MODEL_SUPPORT allows at least 64K output tokens (128K on the Opus 5 and Sonnet 5
+# families), so this is a typo guard rather than a limit anyone meets in practice.
+MAX_OUTPUT_TOKENS = 64_000
+
+# Thinking shares this budget with the response. Reviewers reading a 20k-character
+# section routinely spent all of a 16_000 budget thinking and were cut off before the
+# JSON began, which bills the full budget and returns nothing. Headroom is close to free:
+# an unused budget costs nothing, an exhausted one costs everything and yields no review.
+DEFAULT_MAX_TOKENS = 32_000
+
+# A truncated call is retried once at lower effort, so one logical call bills at most two
+# attempts. `run_dry_run` prices the worst case with this; the retry structure in
+# `call_reviewer` and `run_final_referee` is what it has to stay in step with, and
+# `test_a_truncated_call_bills_at_most_max_attempts` is what keeps them honest.
+MAX_ATTEMPTS_PER_CALL = 2
 
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_EFFORT = "high"
@@ -323,10 +335,10 @@ def validate_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> N
     """Reject invocations the API would refuse, before any request is made."""
     if max_tokens < 1:
         raise ConfigurationError("--max-tokens must be a positive integer.")
-    if max_tokens > MAX_NONSTREAMING_TOKENS:
+    if max_tokens > MAX_OUTPUT_TOKENS:
         raise ConfigurationError(
-            f"--max-tokens is capped at {MAX_NONSTREAMING_TOKENS:,}: above that the SDK "
-            "requires streaming, which this pipeline does not use."
+            f"--max-tokens is capped at {MAX_OUTPUT_TOKENS:,} here. A model's own output "
+            "limit may be lower still, in which case the API rejects the request."
         )
     if effort not in EFFORT_LEVELS:
         raise ConfigurationError(
@@ -890,7 +902,9 @@ def _api_call_with_schema(
     review_protocol: str | None = None,
 ):
     # The SDK merges output_format into output_config, so passing both is supported.
-    return client.messages.parse(
+    # `stream` is what lifts max_tokens off the non-streaming ceiling; its
+    # get_final_message() still returns a ParsedMessage, so `.parsed_output` is unchanged.
+    with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
         system=_build_system(global_context, system_prompt, review_protocol),
@@ -898,7 +912,8 @@ def _api_call_with_schema(
         thinking=thinking,
         output_config={"effort": effort},
         output_format=Review,
-    )
+    ) as stream:
+        return stream.get_final_message()
 
 
 def _api_call(
@@ -914,14 +929,15 @@ def _api_call(
     review_protocol: str | None = None,
     preamble: str = "",
 ):
-    return client.messages.create(
+    with client.messages.stream(
         model=model,
         max_tokens=max_tokens,
         system=_build_system(global_context, system_prompt, review_protocol),
         messages=_build_messages(known_issues, to_review, preamble),
         thinking=thinking,
         output_config={"effort": effort},
-    )
+    ) as stream:
+        return stream.get_final_message()
 
 
 def _count_tokens(
@@ -957,6 +973,16 @@ def _format_review_target(chunk: Chunk, scope: ReviewerScope) -> str:
     )
 
 
+def lower_effort(effort: str) -> str | None:
+    """The next effort level down, or None at the bottom.
+
+    Lowering effort is always allowed: `disabled_thinking_max_effort` is an upper bound,
+    so no model that accepted a level can reject the one below it.
+    """
+    index = EFFORT_LEVELS.index(effort)
+    return EFFORT_LEVELS[index - 1] if index > 0 else None
+
+
 def call_reviewer(
     client: anthropic.Anthropic,
     reviewer: ReviewerConfig,
@@ -967,30 +993,54 @@ def call_reviewer(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
 ):
-    """Send a chunk to a reviewer and return its parsed JSON issue report."""
-    response = _call_with_retry(
-        lambda: _api_call_with_schema(
-            client=client,
-            model=reviewer.model,
-            system_prompt=reviewer.prompt_text,
-            global_context=global_context,
-            known_issues=known_issues,
-            to_review=_format_review_target(chunk, reviewer.scope),
-            max_tokens=max_tokens,
-            thinking=reviewer.thinking_config,
-            effort=effort,
-            review_protocol=review_protocol,
+    """Send a chunk to a reviewer and return its parsed JSON issue report.
+
+    A reviewer that exhausts `max_tokens` thinking is retried once a level down. That
+    trades some depth on one section for a review at all: the truncated attempt is billed
+    in full and returns nothing, so the alternative is paying the same and losing the
+    section's coverage entirely.
+    """
+
+    def attempt(at_effort: str):
+        return _call_with_retry(
+            lambda: _api_call_with_schema(
+                client=client,
+                model=reviewer.model,
+                system_prompt=reviewer.prompt_text,
+                global_context=global_context,
+                known_issues=known_issues,
+                to_review=_format_review_target(chunk, reviewer.scope),
+                max_tokens=max_tokens,
+                thinking=reviewer.thinking_config,
+                effort=at_effort,
+                review_protocol=review_protocol,
+            )
         )
-    )
+
+    response = attempt(effort)
+
+    # Thinking shares the max_tokens budget with the response, so a truncated reply is a
+    # realistic failure rather than a theoretical one. One step down, then give up: if a
+    # whole level of thinking did not free enough budget, the budget is what is short.
+    retry_effort = lower_effort(effort)
+    if (
+        (not response or not response.parsed_output)
+        and response is not None
+        and response.stop_reason == "max_tokens"
+        and retry_effort is not None
+    ):
+        print(
+            f"[yellow]  {reviewer.name} exhausted {max_tokens:,} tokens on "
+            f"'{chunk.name}' at --effort {effort}; retrying at {retry_effort}.[/yellow]"
+        )
+        response = attempt(retry_effort)
 
     if not response or not response.parsed_output:
-        # Thinking shares the max_tokens budget with the response, so a truncated reply
-        # is a realistic failure rather than a theoretical one. Say which it was.
         if response is not None and response.stop_reason == "max_tokens":
             raise ValueError(
                 f"{reviewer.name} hit the {max_tokens:,}-token limit on section "
                 f"'{chunk.name}' before finishing its JSON. Raise --max-tokens (up to "
-                f"{MAX_NONSTREAMING_TOKENS:,}) or lower --effort."
+                f"{MAX_OUTPUT_TOKENS:,}) or lower --effort."
             )
         raise ValueError(
             f"No parsed output from reviewer {reviewer.name} on section '{chunk.name}'"
@@ -1018,22 +1068,36 @@ def run_final_referee(
     coverage_note: str = "",
 ) -> str:
     """Synthesize a markdown referee report from the paper and the collected issues."""
+
     # This pass weighs and prioritises every finding across the whole paper, so it
     # thinks — and it runs once per review, so the extra cost is marginal.
-    response = _call_with_retry(
-        lambda: _api_call(
-            client=client,
-            model=model,
-            system_prompt=system_prompt,
-            global_context=global_context,
-            known_issues=format_all_issues(issues),
-            to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
-            max_tokens=max_tokens,
-            thinking=THINKING_ADAPTIVE,
-            effort=effort,
-            preamble=coverage_note,
+    def attempt(at_effort: str):
+        return _call_with_retry(
+            lambda: _api_call(
+                client=client,
+                model=model,
+                system_prompt=system_prompt,
+                global_context=global_context,
+                known_issues=format_all_issues(issues),
+                to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
+                max_tokens=max_tokens,
+                thinking=THINKING_ADAPTIVE,
+                effort=at_effort,
+                preamble=coverage_note,
+            )
         )
-    )
+
+    response = attempt(effort)
+
+    # This call reads the whole paper and every issue, so it is the likeliest of all of
+    # them to think past the budget. Losing it loses the report, which is the deliverable.
+    retry_effort = lower_effort(effort)
+    if response.stop_reason == "max_tokens" and retry_effort is not None:
+        print(
+            f"[yellow]Final referee exhausted {max_tokens:,} tokens at --effort "
+            f"{effort}; retrying at {retry_effort}.[/yellow]"
+        )
+        response = attempt(retry_effort)
 
     return extract_text(response)
 
@@ -1522,7 +1586,9 @@ def run_dry_run(
     print(
         "[yellow]Warning: rough lower-bound estimate. The 'known issues' context fed to each "
         "reviewer (which grows as earlier reviewers produce output) is not counted here "
-        "because it depends on actual generation. Real input cost will also be lower than "
+        "because it depends on actual generation. Nor is the second attempt a truncated "
+        "call makes, though it re-sends the same prefix seconds later and so should mostly "
+        "be a cache hit. Real input cost will also be lower than "
         "shown once prompt caching kicks in (cache reads are 90 % cheaper).[/yellow]\n"
     )
 
@@ -1581,11 +1647,15 @@ def run_dry_run(
         for model, count in token_totals.items()
         if model in MODEL_PRICING
     )
+    # Two bounds rather than one: a single budget per call assumes nothing truncates,
+    # and a truncated call is retried, so the true ceiling is a budget per attempt. The
+    # gap between them is what truncation costs, which is the number worth seeing.
     max_output_cost = sum(
         count * max_tokens / 1e6 * MODEL_PRICING[model]["output"]
         for model, count in call_counts.items()
         if model in MODEL_PRICING
     )
+    max_output_cost_with_retries = max_output_cost * MAX_ATTEMPTS_PER_CALL
 
     print("\n[bold]Input tokens by model (worst-case, no cache hits):[/bold]")
     for model, count in token_totals.items():
@@ -1618,6 +1688,18 @@ def run_dry_run(
         f"[bold green]Max output cost: ${max_output_cost:.2f}[/bold green]  "
         f"(a ceiling nobody reaches: it assumes all {sum(call_counts.values())} calls "
         f"emit the full {max_tokens:,} output tokens, and {no_thinking} of "
-        f"{len(prompts.reviewers)} reviewers have thinking disabled)"
+        f"{len(prompts.reviewers)} reviewers have thinking disabled. --max-tokens is "
+        "deliberate headroom against truncation, not an expected spend: unused budget "
+        "is not billed, whereas a call cut off mid-JSON is billed in full for nothing)"
     )
-    print(f"[bold green]Max total cost: ${input_cost + max_output_cost:.2f}[/bold green]")
+    print(
+        f"[bold green]Max output cost if every call truncates and retries: "
+        f"${max_output_cost_with_retries:.2f}[/bold green]  "
+        f"(the true ceiling: a truncated call is retried once at lower effort, so one "
+        f"call bills up to {MAX_ATTEMPTS_PER_CALL} attempts)"
+    )
+    print(
+        f"[bold green]Max total cost: ${input_cost + max_output_cost:.2f}[/bold green] "
+        f"to [bold green]${input_cost * MAX_ATTEMPTS_PER_CALL + max_output_cost_with_retries:.2f}"
+        f"[/bold green] with retries"
+    )

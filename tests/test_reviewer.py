@@ -23,7 +23,8 @@ from llm_reviewer.reviewer import (
     DEFAULT_MODEL_STRONG,
     EFFORT_LEVELS,
     FRONT_MATTER_NAME,
-    MAX_NONSTREAMING_TOKENS,
+    MAX_ATTEMPTS_PER_CALL,
+    MAX_OUTPUT_TOKENS,
     MODEL_PRICING,
     MODEL_SUPPORT,
     MOVING_SUFFIX,
@@ -48,6 +49,7 @@ from llm_reviewer.reviewer import (
     format_coverage_note,
     load_known_issues,
     load_prompts,
+    lower_effort,
     mask_non_content,
     resolve_inputs,
     run_dry_run,
@@ -359,6 +361,22 @@ class FakeParsed:
         self.stop_reason = stop_reason
 
 
+class FakeStreamManager:
+    """`client.messages.stream(...)` returns a context manager, not a message."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def get_final_message(self):
+        return self._result
+
+
 def _assert_sdk_accepts(method_name: str, kwargs: dict) -> None:
     """Fail if the real SDK method would reject these arguments.
 
@@ -378,21 +396,35 @@ class FakeClient:
         error: Exception | None = None,
         stop_reason: str = "end_turn",
         issues_per_call: int = 0,
+        truncate_first: int | None = None,
     ):
         self.error = error
         self.stop_reason = stop_reason
         self.issues_per_call = issues_per_call
+        # Truncate this many calls and then succeed, so a retry has something to reach.
+        self.truncate_first = truncate_first
         self.models_probed: list[str] = []
         self.parse_calls: list[dict] = []
         self.create_calls: list[dict] = []
         self.messages = self
 
+    def stream(self, **kwargs):
+        """Every generation call streams, so this is the only entry point the pipeline uses.
+
+        The structured and unstructured calls are told apart the way the SDK tells them
+        apart: by whether an `output_format` was asked for.
+        """
+        _assert_sdk_accepts("stream", kwargs)
+        result = self.parse(**kwargs) if "output_format" in kwargs else self.create(**kwargs)
+        return FakeStreamManager(result)
+
     def create(self, **kwargs):
         """The unstructured call, used only by the final referee."""
-        _assert_sdk_accepts("create", kwargs)
         self.create_calls.append(kwargs)
         if self.error is not None:
             raise self.error
+        if self._truncates():
+            return SimpleNamespace(content=[], stop_reason="max_tokens")
         return SimpleNamespace(
             content=[SimpleNamespace(type="text", text="# Summary\n\nreport")],
             stop_reason=self.stop_reason,
@@ -405,12 +437,17 @@ class FakeClient:
             raise self.error
         return SimpleNamespace(input_tokens=100)
 
+    def _truncates(self) -> bool:
+        """Whether this call runs out of budget, honouring `truncate_first` if set."""
+        if self.truncate_first is not None:
+            return len(self.parse_calls) + len(self.create_calls) <= self.truncate_first
+        return self.stop_reason == "max_tokens"
+
     def parse(self, **kwargs):
-        _assert_sdk_accepts("parse", kwargs)
         self.parse_calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        if self.stop_reason == "max_tokens":
+        if self._truncates():
             return FakeParsed(None, stop_reason="max_tokens")
         target = kwargs["messages"][0]["content"][1]["text"]
         # Paper-scoped reviewers are handed the whole source, which carries no section
@@ -591,7 +628,7 @@ def test_default_models_are_priced():
 
 def test_default_max_tokens_stays_under_the_non_streaming_ceiling():
     """Above this the SDK raises ValueError instead of making the call."""
-    assert 0 < DEFAULT_MAX_TOKENS <= MAX_NONSTREAMING_TOKENS
+    assert 0 < DEFAULT_MAX_TOKENS <= MAX_OUTPUT_TOKENS
 
 
 def test_default_effort_is_a_valid_level():
@@ -650,6 +687,96 @@ def test_call_reviewer_names_truncation_as_the_cause():
         )
 
 
+def test_call_reviewer_retries_a_truncated_call_one_effort_level_down():
+    """A truncated call is billed in full and returns nothing, so the retry is free of
+    any trade-off but depth: without it the section loses that reviewer entirely."""
+    client = FakeClient(truncate_first=1, issues_per_call=1)
+    prompts = load_prompts()
+    review = call_reviewer(
+        client=client,
+        reviewer=prompts.reviewers["FormalVerifier"],
+        chunk=Chunk("Intro", "body"),
+        global_context="ctx",
+        known_issues="none",
+        effort="high",
+    )
+    assert len(review.issues) == 1
+    efforts = [call["output_config"]["effort"] for call in client.parse_calls]
+    assert efforts == ["high", "medium"]
+
+
+def test_a_truncated_call_bills_at_most_max_attempts():
+    """`run_dry_run` prices its ceiling off MAX_ATTEMPTS_PER_CALL, so if the retry
+    structure ever grows another attempt, that ceiling silently stops being one."""
+    client = FakeClient(stop_reason="max_tokens")
+    prompts = load_prompts()
+    with pytest.raises(ValueError):
+        call_reviewer(
+            client=client,
+            reviewer=prompts.reviewers["FormalVerifier"],
+            chunk=Chunk("Intro", "body"),
+            global_context="ctx",
+            known_issues="none",
+            effort="high",
+        )
+    assert len(client.parse_calls) == MAX_ATTEMPTS_PER_CALL
+
+    referee = FakeClient(stop_reason="max_tokens")
+    with pytest.raises(ValueError):
+        run_final_referee(
+            client=referee,
+            tex="paper",
+            issues=[],
+            global_context="ctx",
+            system_prompt="be a referee",
+            model="strong",
+            effort="high",
+        )
+    assert len(referee.create_calls) == MAX_ATTEMPTS_PER_CALL
+
+
+def test_call_reviewer_does_not_retry_below_the_lowest_effort():
+    """`low` has nothing under it, so a truncation there is final rather than a loop."""
+    client = FakeClient(stop_reason="max_tokens")
+    prompts = load_prompts()
+    with pytest.raises(ValueError, match="Raise --max-tokens"):
+        call_reviewer(
+            client=client,
+            reviewer=prompts.reviewers["FormalVerifier"],
+            chunk=Chunk("Intro", "body"),
+            global_context="ctx",
+            known_issues="none",
+            effort="low",
+        )
+    assert len(client.parse_calls) == 1
+
+
+def test_final_referee_retries_a_truncated_synthesis():
+    """This call reads the whole paper and every issue, and losing it loses the report."""
+    client = FakeClient(truncate_first=1)
+    report = run_final_referee(
+        client=client,
+        tex="paper",
+        issues=[],
+        global_context="ctx",
+        system_prompt="be a referee",
+        model="strong",
+        effort="high",
+    )
+    assert report.startswith("# Summary")
+    efforts = [call["output_config"]["effort"] for call in client.create_calls]
+    assert efforts == ["high", "medium"]
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_lower_effort_walks_down_the_scale_and_stops(effort):
+    below = lower_effort(effort)
+    if effort == "low":
+        assert below is None
+    else:
+        assert EFFORT_LEVELS.index(below) == EFFORT_LEVELS.index(effort) - 1
+
+
 # ------------------------------------------------------------------- settings guard
 
 
@@ -660,7 +787,7 @@ def test_validate_settings_accepts_the_default_configuration(effort):
 
 def test_validate_settings_rejects_max_tokens_above_the_ceiling():
     with pytest.raises(ConfigurationError, match="capped at"):
-        validate_settings(load_prompts(), max_tokens=MAX_NONSTREAMING_TOKENS + 1, effort="high")
+        validate_settings(load_prompts(), max_tokens=MAX_OUTPUT_TOKENS + 1, effort="high")
 
 
 def test_validate_settings_rejects_non_positive_max_tokens():

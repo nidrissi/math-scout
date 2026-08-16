@@ -110,9 +110,13 @@ llm-reviewer paper.tex --dry-run
 ```
 
 This counts input tokens and prints a cost estimate without sending a single generation
-request. The estimate is a rough lower bound: it excludes the accumulated "known issues"
-context that grows during a run, and it does not model prompt-cache savings, which cut
-repeat input cost substantially.
+request. The input figure is a rough lower bound: it excludes the accumulated "known
+issues" context that grows during a run, and it does not model prompt-cache savings, which
+cut repeat input cost substantially.
+
+The output figures are the opposite — ceilings nobody reaches, since they assume every
+call emits its full `--max-tokens`. Two are printed: one assuming no call truncates, and
+one assuming every call truncates and is retried. Real spend lands well below the first.
 
 Before a real run starts, the tool prints the chunks it extracted and asks you to confirm.
 
@@ -141,7 +145,7 @@ llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/
 | `-y`, `--yes` | Skip the confirmation prompt. Required when stdin is not a terminal |
 | `--strong-model ID` | Model for the three deep reviewers and the final referee |
 | `--fast-model ID` | Model for the two lighter reviewers |
-| `--max-tokens N` | Output token limit per call (default 16000, maximum 21333) |
+| `--max-tokens N` | Output token limit per call (default 32000, maximum 64000) |
 | `--effort LEVEL` | `low`, `medium`, `high`, `xhigh`, or `max` (default `high`) |
 | `--version` | Print the version |
 
@@ -174,11 +178,21 @@ pass, raise to `xhigh` or `max` on something that warrants it.
 
 Two constraints are worth knowing:
 
-- `--max-tokens` covers thinking *and* response text together, and is capped at 21333.
-  Above that the SDK requires streaming, which this pipeline does not use.
+- `--max-tokens` covers thinking *and* response text together. **It is headroom, not a
+  budget to spend.** Unused budget costs nothing, but a call that runs out mid-answer is
+  billed in full and returns nothing usable — so a cap set too low *causes* cost rather
+  than limiting it. Lower it to save money and you will generally spend more. The default
+  of 32000 leaves room for a deep reviewer to think its way through a long section; if you
+  see truncation warnings, raise it rather than lowering it.
 - Some models reject a disabled-thinking request at `xhigh` or `max` effort. This can't
   happen with the defaults, but `--fast-model claude-opus-5 --effort max` would hit it, so
   the combination is refused up front with an explanation rather than failing per call.
+
+If a call does exhaust its budget, it is retried once at one `--effort` level down, which
+trades some depth on that one section for getting a review at all. A second truncation is
+reported as a failed call and the run continues. Because a truncated call bills in full,
+`--dry-run` reports its worst case both ways: assuming nothing truncates, and assuming
+everything does and is retried.
 
 ### Resuming
 
