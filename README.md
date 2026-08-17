@@ -83,7 +83,7 @@ uv run llm-reviewer paper.tex --dry-run
 
 ## Credentials
 
-Only providers selected by `--strong-model` and `--fast-model` are initialized or
+Only providers selected by the resolved preset and model flags are initialized or
 contacted. Bare model IDs use Anthropic, so the default command still needs only
 Anthropic credentials.
 
@@ -151,6 +151,8 @@ llm-reviewer paper.tex                          # review, with a confirmation pr
 llm-reviewer paper.tex --output /tmp/review     # choose the output directory
 llm-reviewer paper.tex --dry-run                # token count + cost estimate only
 llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/scripts)
+llm-reviewer paper.tex --preset sol-luna        # OpenAI Sol for strong, Luna for fast
+llm-reviewer paper.tex --preset opus-sonnet     # Anthropic Opus for strong, Sonnet for fast
 llm-reviewer paper.tex \
   --strong-model openai:gpt-5.6-sol \
   --fast-model anthropic:claude-sonnet-5        # mixed-provider run
@@ -161,6 +163,7 @@ llm-reviewer paper.tex \
 | `--output DIR` | Where to write results (default: `<input_dir>/review/`) |
 | `--dry-run` | Count tokens and estimate cost; send no generation requests |
 | `-y`, `--yes` | Skip the confirmation prompt. Required when stdin is not a terminal |
+| `--preset NAME` | Set both tiers to `sol-luna` or `opus-sonnet` |
 | `--strong-model [PROVIDER:]ID` | Model for the three deep reviewers and final referee |
 | `--fast-model [PROVIDER:]ID` | Model for the two lighter reviewers |
 | `--max-tokens N` | Output token limit per call (default 32000, maximum 64000) |
@@ -186,9 +189,18 @@ Bare IDs remain Anthropic for command and `state.json` compatibility. Prefix a m
 `openai:` or `anthropic:` to select its native provider:
 
 ```bash
+llm-reviewer paper.tex --preset opus-sonnet
+llm-reviewer paper.tex --preset sol-luna
 llm-reviewer paper.tex --strong-model claude-opus-4-7 --fast-model claude-sonnet-4-6
 llm-reviewer paper.tex --strong-model openai:gpt-5.6-sol --fast-model claude-sonnet-5
 ```
+
+The presets set both tiers together: `opus-sonnet` resolves to `claude-opus-5` and
+`claude-sonnet-5`, while `sol-luna` resolves to `openai:gpt-5.6-sol` and
+`openai:gpt-5.6-luna`. An explicit `--strong-model` or `--fast-model` overrides only that
+tier, so `--preset sol-luna --fast-model claude-sonnet-5` is a concise mixed-provider
+configuration. State records the resolved model IDs, not the preset name, so a preset
+command and its fully explicit equivalent can resume the same run.
 
 The final referee always uses the strong model, including its provider. Model flags apply
 at the existing strong/fast tier boundary; there are no per-reviewer model flags.

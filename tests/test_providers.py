@@ -19,6 +19,7 @@ from llm_reviewer.providers import (
     GenerationRequest,
     ModelRef,
     OpenAIProvider,
+    Pricing,
     PromptBlock,
     ProviderAuthenticationError,
     ProviderEmptyOutputError,
@@ -170,6 +171,15 @@ def test_registry_instantiates_only_referenced_providers():
     assert isinstance(registry.for_model(ModelRef.parse("openai:gpt-5.6-sol")), OpenAIProvider)
     with pytest.raises(ConfigurationError, match="No 'anthropic' provider"):
         registry.for_model(ModelRef.parse("claude-opus-5"))
+
+
+def test_luna_pricing_matches_current_provider_rates():
+    assert OpenAIProvider.pricing("gpt-5.6-luna") == Pricing(
+        input=0.2,
+        output=1.2,
+        cache_read=0.02,
+        cache_write=0.25,
+    )
 
 
 def test_anthropic_structured_stream_shape_binds_to_installed_sdk():
