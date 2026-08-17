@@ -28,21 +28,19 @@ class ModelRef:
             return value
         provider, separator, model = value.partition(":")
         if not separator:
-            provider, model = "anthropic", provider
+            raise ConfigurationError(
+                f"Invalid model {value!r}; expected PROVIDER:MODEL. "
+                "Use --preset opus-sonnet or --preset sol-luna for a common model pair."
+            )
         provider = provider.strip().lower()
         model = model.strip()
         if not provider or not model:
-            raise ConfigurationError(f"Invalid model {value!r}; expected MODEL or PROVIDER:MODEL.")
+            raise ConfigurationError(f"Invalid model {value!r}; expected PROVIDER:MODEL.")
         return cls(provider=provider, model=model)
 
     @property
     def qualified(self) -> str:
         return f"{self.provider}:{self.model}"
-
-    @property
-    def state_id(self) -> str:
-        """Serialize Anthropic the old way so existing state files remain reusable."""
-        return self.model if self.provider == "anthropic" else self.qualified
 
     def __str__(self) -> str:
         return self.qualified
