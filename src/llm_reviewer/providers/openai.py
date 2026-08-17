@@ -55,7 +55,7 @@ class OpenAIProvider(Provider):
         "gpt-5.6": Pricing(input=5.0, output=30.0, cache_read=0.5, cache_write=6.25),
         "gpt-5.6-sol": Pricing(input=5.0, output=30.0, cache_read=0.5, cache_write=6.25),
         "gpt-5.6-terra": Pricing(input=2.5, output=15.0, cache_read=0.25, cache_write=3.125),
-        "gpt-5.6-luna": Pricing(input=1.0, output=6.0, cache_read=0.1, cache_write=1.25),
+        "gpt-5.6-luna": Pricing(input=0.2, output=1.2, cache_read=0.02, cache_write=0.25),
     }
 
     def __init__(self, client: openai_sdk.OpenAI | None = None):

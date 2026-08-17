@@ -53,8 +53,14 @@ def run(argv, monkeypatch, result=None, boom=None):
 
 def test_defaults_match_the_library():
     args = cli.build_parser().parse_args(["paper.tex"])
-    assert args.strong_model == DEFAULT_MODEL_STRONG
-    assert args.fast_model == DEFAULT_MODEL_FAST
+    assert args.preset is None
+    assert args.strong_model is None
+    assert args.fast_model is None
+    assert cli.resolve_model_selection(
+        preset=args.preset,
+        strong_model=args.strong_model,
+        fast_model=args.fast_model,
+    ) == (DEFAULT_MODEL_STRONG, DEFAULT_MODEL_FAST)
     assert args.max_tokens == DEFAULT_MAX_TOKENS
     assert args.effort == DEFAULT_EFFORT
     assert args.yes is False
@@ -74,6 +80,41 @@ def test_short_yes_flag_works():
 def test_provider_qualified_models_are_accepted():
     args = cli.build_parser().parse_args(["paper.tex", "--strong-model", "openai:gpt-5.6-sol"])
     assert args.strong_model == "openai:gpt-5.6-sol"
+
+
+@pytest.mark.parametrize(
+    ("preset", "models"),
+    [
+        ("opus-sonnet", ("claude-opus-5", "claude-sonnet-5")),
+        ("sol-luna", ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna")),
+    ],
+)
+def test_model_presets_select_both_tiers(preset, models):
+    args = cli.build_parser().parse_args(["paper.tex", "--preset", preset])
+    assert (
+        cli.resolve_model_selection(
+            preset=args.preset,
+            strong_model=args.strong_model,
+            fast_model=args.fast_model,
+        )
+        == models
+    )
+
+
+def test_explicit_model_overrides_one_preset_tier():
+    args = cli.build_parser().parse_args(
+        ["paper.tex", "--preset", "sol-luna", "--fast-model", "claude-sonnet-5"]
+    )
+    assert cli.resolve_model_selection(
+        preset=args.preset,
+        strong_model=args.strong_model,
+        fast_model=args.fast_model,
+    ) == ("openai:gpt-5.6-sol", "claude-sonnet-5")
+
+
+def test_unknown_model_preset_is_rejected():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["paper.tex", "--preset", "turbo"])
 
 
 # --------------------------------------------------------------------------- exit codes
