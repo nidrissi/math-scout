@@ -164,8 +164,8 @@ llm-reviewer paper.tex \
 | `--dry-run` | Count tokens and estimate cost; send no generation requests |
 | `-y`, `--yes` | Skip the confirmation prompt. Required when stdin is not a terminal |
 | `--preset NAME` | Set both tiers to `sol-luna` or `opus-sonnet` |
-| `--strong-model [PROVIDER:]ID` | Model for the three deep reviewers and final referee |
-| `--fast-model [PROVIDER:]ID` | Model for the two lighter reviewers |
+| `--strong-model PROVIDER:MODEL` | Model for the three deep reviewers and final referee |
+| `--fast-model PROVIDER:MODEL` | Model for the two lighter reviewers |
 | `--max-tokens N` | Output token limit per call (default 32000, maximum 64000) |
 | `--effort LEVEL` | `low`, `medium`, `high`, `xhigh`, or `max` (default `high`) |
 | `--version` | Print the version |
@@ -184,23 +184,33 @@ warning rather than aborting the run.
 
 ### Choosing providers, models, and effort
 
-Defaults are `claude-opus-5` for the strong tier and `claude-sonnet-5` for the fast tier.
-Bare IDs remain Anthropic for command and `state.json` compatibility. Prefix a model with
-`openai:` or `anthropic:` to select its native provider:
+Defaults are `anthropic:claude-opus-5` for the strong tier and
+`anthropic:claude-sonnet-5` for the fast tier, so the command without model flags keeps
+using the same Anthropic models. Every explicit model must use `provider:model`; bare IDs
+are rejected. Use a preset to keep common model pairs concise:
 
 ```bash
 llm-reviewer paper.tex --preset opus-sonnet
 llm-reviewer paper.tex --preset sol-luna
-llm-reviewer paper.tex --strong-model claude-opus-4-7 --fast-model claude-sonnet-4-6
-llm-reviewer paper.tex --strong-model openai:gpt-5.6-sol --fast-model claude-sonnet-5
+llm-reviewer paper.tex \
+  --strong-model anthropic:claude-opus-4-7 \
+  --fast-model anthropic:claude-sonnet-4-6
+llm-reviewer paper.tex \
+  --strong-model openai:gpt-5.6-sol \
+  --fast-model anthropic:claude-sonnet-5
 ```
 
-The presets set both tiers together: `opus-sonnet` resolves to `claude-opus-5` and
-`claude-sonnet-5`, while `sol-luna` resolves to `openai:gpt-5.6-sol` and
-`openai:gpt-5.6-luna`. An explicit `--strong-model` or `--fast-model` overrides only that
-tier, so `--preset sol-luna --fast-model claude-sonnet-5` is a concise mixed-provider
-configuration. State records the resolved model IDs, not the preset name, so a preset
-command and its fully explicit equivalent can resume the same run.
+The presets set both tiers together: `opus-sonnet` resolves to
+`anthropic:claude-opus-5` and `anthropic:claude-sonnet-5`, while `sol-luna` resolves to
+`openai:gpt-5.6-sol` and `openai:gpt-5.6-luna`. An explicit `--strong-model` or
+`--fast-model` overrides only that tier, so
+`--preset sol-luna --fast-model anthropic:claude-sonnet-5` is a concise mixed-provider
+configuration. State records the resolved qualified model IDs, not the preset name, so a
+preset command and its fully explicit equivalent can resume the same run.
+
+**Existing output directories whose `state.json` contains bare Anthropic model IDs are
+not reusable. Delete the output directory or pass a different `--output`; they are
+rejected through the normal settings-mismatch check rather than migrated.**
 
 The final referee always uses the strong model, including its provider. Model flags apply
 at the existing strong/fast tier boundary; there are no per-reviewer model flags.
@@ -223,9 +233,9 @@ Two constraints are worth knowing:
   of 32000 leaves room for a deep reviewer to think its way through a long section; if you
   see truncation warnings, raise it rather than lowering it.
 - Some Anthropic models reject a disabled-thinking request at `xhigh` or `max` effort.
-  This can't happen with the defaults, but `--fast-model claude-opus-5 --effort max`
-  would hit it, so the combination is refused up front with an explanation rather than
-  failing per call.
+  This can't happen with the defaults, but
+  `--fast-model anthropic:claude-opus-5 --effort max` would hit it, so the combination is
+  refused up front with an explanation rather than failing per call.
 
 If a call does exhaust its budget, it is retried once at one provider-mapped `--effort`
 level down when that produces a different request. A second truncation is a real failure.

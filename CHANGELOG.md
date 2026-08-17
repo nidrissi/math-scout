@@ -7,11 +7,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+**This invalidates existing output directories.** State now records qualified Anthropic
+model IDs, so prior state containing bare IDs no longer matches. Delete `review/`, or pass
+a different `--output`; existing paid reviews are not migrated.
+
 ### Added
 
-- Native OpenAI Responses API support alongside Anthropic. Model flags now accept
-  `[provider:]model`, so strong and fast tiers can use different providers while the
-  final referee continues to follow the strong tier.
+- Native OpenAI Responses API support alongside Anthropic. Explicit model flags require
+  `provider:model`, so strong and fast tiers can use different providers while the final
+  referee continues to follow the strong tier. Bare model IDs are rejected rather than
+  inferred as Anthropic.
 - Provider-neutral generation, token-counting, capability, pricing, retry, and error
   contracts, with credential-free adapter tests bound to both installed SDK signatures.
 - `--preset opus-sonnet` and `--preset sol-luna` select the common Anthropic and OpenAI
@@ -20,8 +25,8 @@ All notable changes to this project are documented here. The format is based on
 ### Changed
 
 - Dry runs group exact token counts by provider-qualified model and keep working when
-  pricing metadata is unavailable. Anthropic resume settings retain their historical
-  bare model IDs; non-Anthropic selections are stored qualified.
+  pricing metadata is unavailable. Every model in resume settings is stored with its
+  provider; historical bare Anthropic state is rejected by the settings-mismatch guard.
 - Prompt caching is translated natively: Anthropic cache controls are preserved, while
   OpenAI GPT-5.6 requests use developer `input_text` breakpoints and a deterministic
   paper-specific cache key.
@@ -224,8 +229,9 @@ First public release. Everything before this lived only in the author's working 
   `UnicodeDecodeError`; Latin-1 is common in older LaTeX.
 - The pre-flight reports rate limits and server errors instead of raising them as
   tracebacks, and retries briefly first.
-- `--fast-model claude-haiku-4-5` is refused with an explanation: Haiku 4.5 rejects the
-  effort and thinking settings every call carries, so it could not have worked.
+- `--fast-model anthropic:claude-haiku-4-5` is refused with an explanation: Haiku 4.5
+  rejects the effort and thinking settings every call carries, so it could not have
+  worked.
 - A typo in the input path no longer leaves an empty output directory behind.
 
 ### Removed

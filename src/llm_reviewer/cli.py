@@ -29,7 +29,7 @@ EXIT_INCOMPLETE = 1
 EXIT_CONFIG = 2
 
 MODEL_PRESETS: dict[str, tuple[str, str]] = {
-    "opus-sonnet": ("claude-opus-5", "claude-sonnet-5"),
+    "opus-sonnet": ("anthropic:claude-opus-5", "anthropic:claude-sonnet-5"),
     "sol-luna": ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna"),
 }
 
@@ -82,20 +82,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strong-model",
         default=None,
-        metavar="ID",
+        metavar="PROVIDER:MODEL",
         help=(
             "Model for FormalVerifier, AdversarialSkeptic, ClaimAuditor, and the final "
-            "referee, as [provider:]model; bare IDs use Anthropic "
+            "referee. Explicit models must use provider:model "
             f"(default without a preset: {DEFAULT_MODEL_STRONG})"
         ),
     )
     parser.add_argument(
         "--fast-model",
         default=None,
-        metavar="ID",
+        metavar="PROVIDER:MODEL",
         help=(
-            "Model for NotationAuditor and ExpositionReferee, as [provider:]model; "
-            f"bare IDs use Anthropic (default without a preset: {DEFAULT_MODEL_FAST})"
+            "Model for NotationAuditor and ExpositionReferee. Explicit models must use "
+            f"provider:model (default without a preset: {DEFAULT_MODEL_FAST})"
         ),
     )
     parser.add_argument(

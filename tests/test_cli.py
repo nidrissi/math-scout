@@ -85,7 +85,10 @@ def test_provider_qualified_models_are_accepted():
 @pytest.mark.parametrize(
     ("preset", "models"),
     [
-        ("opus-sonnet", ("claude-opus-5", "claude-sonnet-5")),
+        (
+            "opus-sonnet",
+            ("anthropic:claude-opus-5", "anthropic:claude-sonnet-5"),
+        ),
         ("sol-luna", ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna")),
     ],
 )
@@ -101,20 +104,65 @@ def test_model_presets_select_both_tiers(preset, models):
     )
 
 
-def test_explicit_model_overrides_one_preset_tier():
-    args = cli.build_parser().parse_args(
-        ["paper.tex", "--preset", "sol-luna", "--fast-model", "claude-sonnet-5"]
+@pytest.mark.parametrize(
+    ("flag", "override", "expected"),
+    [
+        (
+            "--strong-model",
+            "anthropic:claude-opus-5",
+            ("anthropic:claude-opus-5", "openai:gpt-5.6-luna"),
+        ),
+        (
+            "--fast-model",
+            "anthropic:claude-sonnet-5",
+            ("openai:gpt-5.6-sol", "anthropic:claude-sonnet-5"),
+        ),
+    ],
+)
+def test_explicit_model_overrides_one_preset_tier(flag, override, expected):
+    args = cli.build_parser().parse_args(["paper.tex", "--preset", "sol-luna", flag, override])
+    assert (
+        cli.resolve_model_selection(
+            preset=args.preset,
+            strong_model=args.strong_model,
+            fast_model=args.fast_model,
+        )
+        == expected
     )
-    assert cli.resolve_model_selection(
-        preset=args.preset,
-        strong_model=args.strong_model,
-        fast_model=args.fast_model,
-    ) == ("openai:gpt-5.6-sol", "claude-sonnet-5")
 
 
 def test_unknown_model_preset_is_rejected():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["paper.tex", "--preset", "turbo"])
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--strong-model", "claude-opus-5"),
+        ("--fast-model", "gpt-5.6-luna"),
+        ("--strong-model", "synthetic-model"),
+    ],
+)
+def test_bare_explicit_model_is_rejected_before_any_side_effect(
+    paper, tmp_path, monkeypatch, capsys, flag, value
+):
+    out = tmp_path / "must-not-exist"
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("bare model reached provider construction, preflight, or generation")
+
+    monkeypatch.setattr(cli.ProviderRegistry, "from_models", classmethod(unexpected))
+    monkeypatch.setattr(cli, "check_access", unexpected)
+    monkeypatch.setattr(cli, "run_pipeline", unexpected)
+
+    code = cli.main([str(paper), "--output", str(out), flag, value, "--yes"])
+
+    assert code == cli.EXIT_CONFIG
+    output = capsys.readouterr().out
+    assert "PROVIDER:MODEL" in output
+    assert "--preset" in output
+    assert not out.exists()
 
 
 # --------------------------------------------------------------------------- exit codes
@@ -172,7 +220,7 @@ def test_max_tokens_at_the_ceiling_is_accepted(paper, monkeypatch, tmp_path):
 
 
 def test_unusable_model_exits_two_before_any_request(paper, monkeypatch, capsys):
-    code = run([str(paper), "--fast-model", "claude-haiku-4-5"], monkeypatch)
+    code = run([str(paper), "--fast-model", "anthropic:claude-haiku-4-5"], monkeypatch)
     assert code == cli.EXIT_CONFIG
     assert "cannot be used here" in capsys.readouterr().out
 

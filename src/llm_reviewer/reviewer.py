@@ -35,8 +35,8 @@ from .providers import (
     provider_type,
 )
 
-DEFAULT_MODEL_STRONG = "claude-opus-5"
-DEFAULT_MODEL_FAST = "claude-sonnet-5"
+DEFAULT_MODEL_STRONG = "anthropic:claude-opus-5"
+DEFAULT_MODEL_FAST = "anthropic:claude-sonnet-5"
 
 # Every call streams, so `max_tokens` is bounded by provider model capabilities rather
 # than an SDK's non-streaming timeout. This application ceiling remains a typo guard;
@@ -1055,7 +1055,7 @@ def prompts_digest(prompts: LoadedPrompts) -> str:
 def run_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> dict:
     """The knobs that change what a reviewer would say, recorded so resume can compare."""
     return {
-        "models": {name: r.model.state_id for name, r in sorted(prompts.reviewers.items())},
+        "models": {name: r.model.qualified for name, r in sorted(prompts.reviewers.items())},
         "max_tokens": max_tokens,
         "effort": effort,
         "prompts": prompts_digest(prompts),
