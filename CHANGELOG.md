@@ -14,6 +14,8 @@ All notable changes to this project are documented here. The format is based on
   final referee continues to follow the strong tier.
 - Provider-neutral generation, token-counting, capability, pricing, retry, and error
   contracts, with credential-free adapter tests bound to both installed SDK signatures.
+- `--preset opus-sonnet` and `--preset sol-luna` select the common Anthropic and OpenAI
+  strong/fast pairs; explicit tier flags can override either half of a preset.
 
 ### Changed
 
@@ -23,6 +25,8 @@ All notable changes to this project are documented here. The format is based on
 - Prompt caching is translated natively: Anthropic cache controls are preserved, while
   OpenAI GPT-5.6 requests use developer `input_text` breakpoints and a deterministic
   paper-specific cache key.
+- OpenAI Luna dry-run estimates use its current $0.20 input and $1.20 output rates per
+  million tokens.
 
 ## [0.1.0a2] — 2026-08-16
 

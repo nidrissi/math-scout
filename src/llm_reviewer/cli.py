@@ -28,6 +28,21 @@ EXIT_OK = 0
 EXIT_INCOMPLETE = 1
 EXIT_CONFIG = 2
 
+MODEL_PRESETS: dict[str, tuple[str, str]] = {
+    "opus-sonnet": ("claude-opus-5", "claude-sonnet-5"),
+    "sol-luna": ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna"),
+}
+
+
+def resolve_model_selection(
+    *, preset: str | None, strong_model: str | None, fast_model: str | None
+) -> tuple[str, str]:
+    """Resolve a preset and per-tier overrides to the concrete model IDs used by a run."""
+    preset_strong, preset_fast = (
+        MODEL_PRESETS[preset] if preset is not None else (DEFAULT_MODEL_STRONG, DEFAULT_MODEL_FAST)
+    )
+    return strong_model or preset_strong, fast_model or preset_fast
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -55,22 +70,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the confirmation prompt. Required when stdin is not a terminal.",
     )
     parser.add_argument(
+        "--preset",
+        choices=tuple(MODEL_PRESETS),
+        default=None,
+        metavar="NAME",
+        help=(
+            "Set both model tiers to a common pair: opus-sonnet or sol-luna. "
+            "Explicit model flags override the corresponding preset tier."
+        ),
+    )
+    parser.add_argument(
         "--strong-model",
-        default=DEFAULT_MODEL_STRONG,
+        default=None,
         metavar="ID",
         help=(
             "Model for FormalVerifier, AdversarialSkeptic, ClaimAuditor, and the final "
             "referee, as [provider:]model; bare IDs use Anthropic "
-            f"(default: {DEFAULT_MODEL_STRONG})"
+            f"(default without a preset: {DEFAULT_MODEL_STRONG})"
         ),
     )
     parser.add_argument(
         "--fast-model",
-        default=DEFAULT_MODEL_FAST,
+        default=None,
         metavar="ID",
         help=(
             "Model for NotationAuditor and ExpositionReferee, as [provider:]model; "
-            f"bare IDs use Anthropic (default: {DEFAULT_MODEL_FAST})"
+            f"bare IDs use Anthropic (default without a preset: {DEFAULT_MODEL_FAST})"
         ),
     )
     parser.add_argument(
@@ -100,7 +125,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     try:
-        prompts = load_prompts(strong_model=args.strong_model, fast_model=args.fast_model)
+        strong_model, fast_model = resolve_model_selection(
+            preset=args.preset,
+            strong_model=args.strong_model,
+            fast_model=args.fast_model,
+        )
+        prompts = load_prompts(strong_model=strong_model, fast_model=fast_model)
         validate_settings(prompts, max_tokens=args.max_tokens, effort=args.effort)
     except ConfigurationError as exc:
         print(f"[red]{exc}[/red]")
