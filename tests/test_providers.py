@@ -156,21 +156,26 @@ def openai_response(*, parsed=None, text=None, status="completed", reason=None, 
     )
 
 
-def test_model_ref_preserves_bare_anthropic_state_and_qualifies_openai():
-    anthropic_model = ModelRef.parse("claude-opus-5")
+def test_model_ref_parses_provider_qualified_ids():
+    anthropic_model = ModelRef.parse("anthropic:claude-opus-5")
     openai_model = ModelRef.parse("openai:gpt-5.6-sol")
 
     assert anthropic_model == ModelRef("anthropic", "claude-opus-5")
-    assert anthropic_model.state_id == "claude-opus-5"
-    assert openai_model.state_id == "openai:gpt-5.6-sol"
+    assert anthropic_model.qualified == "anthropic:claude-opus-5"
     assert openai_model.qualified == "openai:gpt-5.6-sol"
+
+
+@pytest.mark.parametrize("value", ["claude-opus-5", "gpt-5.6-sol", "synthetic-model"])
+def test_model_ref_rejects_every_unqualified_id(value):
+    with pytest.raises(ConfigurationError, match="PROVIDER:MODEL.*--preset"):
+        ModelRef.parse(value)
 
 
 def test_registry_instantiates_only_referenced_providers():
     registry = ProviderRegistry.from_models([ModelRef.parse("openai:gpt-5.6-sol")])
     assert isinstance(registry.for_model(ModelRef.parse("openai:gpt-5.6-sol")), OpenAIProvider)
     with pytest.raises(ConfigurationError, match="No 'anthropic' provider"):
-        registry.for_model(ModelRef.parse("claude-opus-5"))
+        registry.for_model(ModelRef.parse("anthropic:claude-opus-5"))
 
 
 def test_luna_pricing_matches_current_provider_rates():
@@ -186,7 +191,7 @@ def test_anthropic_structured_stream_shape_binds_to_installed_sdk():
     native = FakeAnthropicClient(anthropic_response(parsed=Review(issues=[])))
     provider = AnthropicProvider(native)
 
-    result = provider.generate(request("claude-opus-5"))
+    result = provider.generate(request("anthropic:claude-opus-5"))
 
     assert result.parsed == Review(issues=[])
     (sent,) = native.messages.stream_calls
@@ -201,7 +206,7 @@ def test_anthropic_structured_stream_shape_binds_to_installed_sdk():
 def test_anthropic_markdown_stream_and_token_count_bind_to_installed_sdk():
     native = FakeAnthropicClient(anthropic_response(text="# Report"))
     provider = AnthropicProvider(native)
-    text_request = request("claude-opus-5", schema=False, reasoning=False)
+    text_request = request("anthropic:claude-opus-5", schema=False, reasoning=False)
 
     assert provider.generate(text_request).text == "# Report"
     assert provider.count_tokens(text_request) == 321
@@ -217,7 +222,7 @@ def test_anthropic_markdown_stream_and_token_count_bind_to_installed_sdk():
 def test_anthropic_truncation_and_native_errors_are_normalized():
     truncated = AnthropicProvider(
         FakeAnthropicClient(anthropic_response(stop_reason="max_tokens"))
-    ).generate(request("claude-opus-5"))
+    ).generate(request("anthropic:claude-opus-5"))
     assert truncated.truncated is True
     assert truncated.completed is False
 
@@ -225,7 +230,7 @@ def test_anthropic_truncation_and_native_errors_are_normalized():
     error = anthropic.AuthenticationError("bad key", response=response, body=None)
     provider = AnthropicProvider(FakeAnthropicClient(error=error))
     with pytest.raises(ProviderAuthenticationError):
-        provider.generate(request("claude-opus-5"))
+        provider.generate(request("anthropic:claude-opus-5"))
 
 
 def test_openai_structured_stream_uses_developer_blocks_breakpoints_and_cache_key():

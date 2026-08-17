@@ -462,7 +462,15 @@ def test_check_access_probes_each_distinct_model_once():
     provider = FakeProvider()
     check_access(
         registry(provider),
-        [ModelRef.parse(name) for name in ("strong", "fast", "strong", "fast")],
+        [
+            ModelRef.parse(name)
+            for name in (
+                "anthropic:strong",
+                "anthropic:fast",
+                "anthropic:strong",
+                "anthropic:fast",
+            )
+        ],
     )
     assert provider.models_probed == ["fast", "strong"]
 
@@ -474,7 +482,10 @@ def test_check_access_routes_distinct_models_to_each_provider_without_generation
 
     check_access(
         providers,
-        [ModelRef.parse("claude-opus-5"), ModelRef.parse("openai:gpt-5.6-sol")],
+        [
+            ModelRef.parse("anthropic:claude-opus-5"),
+            ModelRef.parse("openai:gpt-5.6-sol"),
+        ],
     )
 
     assert anthropic_provider.models_probed == ["claude-opus-5"]
@@ -486,13 +497,13 @@ def test_check_access_reports_missing_credentials():
     # The SDK raises a bare TypeError when no credential can be resolved at all.
     client = FakeProvider(ProviderAuthenticationError("Could not resolve authentication method."))
     with pytest.raises(ConfigurationError, match="ANTHROPIC_API_KEY"):
-        check_access(registry(client), [ModelRef.parse("strong")])
+        check_access(registry(client), [ModelRef.parse("anthropic:strong")])
 
 
 def test_check_access_reports_rejected_credentials():
     client = FakeProvider(ProviderAuthenticationError("invalid x-api-key"))
     with pytest.raises(ConfigurationError, match="rejected"):
-        check_access(registry(client), [ModelRef.parse("strong")])
+        check_access(registry(client), [ModelRef.parse("anthropic:strong")])
 
 
 def test_check_access_reports_openai_credentials_help():
@@ -504,20 +515,20 @@ def test_check_access_reports_openai_credentials_help():
 def test_check_access_reports_an_unknown_model():
     client = FakeProvider(ProviderModelError("model not found"))
     with pytest.raises(ConfigurationError, match="anthropic:made-up-model.*not available"):
-        check_access(registry(client), [ModelRef.parse("made-up-model")])
+        check_access(registry(client), [ModelRef.parse("anthropic:made-up-model")])
 
 
 def test_check_access_reports_an_unreachable_api():
     client = FakeProvider(ProviderConnectionError("offline"))
     with pytest.raises(ConfigurationError, match="Cannot reach"):
-        check_access(registry(client), [ModelRef.parse("strong")])
+        check_access(registry(client), [ModelRef.parse("anthropic:strong")])
 
 
 # ---------------------------------------------------------------------------- prompts
 
 
 def test_load_prompts_reads_every_prompt_including_the_final_referee():
-    prompts = load_prompts(strong_model="strong-x", fast_model="fast-y")
+    prompts = load_prompts(strong_model="anthropic:strong-x", fast_model="anthropic:fast-y")
     assert set(prompts.reviewers) == {
         "FormalVerifier",
         "AdversarialSkeptic",
@@ -531,13 +542,18 @@ def test_load_prompts_reads_every_prompt_including_the_final_referee():
 
 
 def test_load_prompts_applies_the_requested_models():
-    prompts = load_prompts(strong_model="strong-x", fast_model="fast-y")
-    assert prompts.reviewers["FormalVerifier"].model == ModelRef.parse("strong-x")
-    assert prompts.reviewers["AdversarialSkeptic"].model == ModelRef.parse("strong-x")
-    assert prompts.reviewers["ClaimAuditor"].model == ModelRef.parse("strong-x")
-    assert prompts.reviewers["NotationAuditor"].model == ModelRef.parse("fast-y")
-    assert prompts.reviewers["ExpositionReferee"].model == ModelRef.parse("fast-y")
-    assert prompts.strong_model == ModelRef.parse("strong-x")
+    prompts = load_prompts(strong_model="anthropic:strong-x", fast_model="anthropic:fast-y")
+    assert prompts.reviewers["FormalVerifier"].model == ModelRef.parse("anthropic:strong-x")
+    assert prompts.reviewers["AdversarialSkeptic"].model == ModelRef.parse("anthropic:strong-x")
+    assert prompts.reviewers["ClaimAuditor"].model == ModelRef.parse("anthropic:strong-x")
+    assert prompts.reviewers["NotationAuditor"].model == ModelRef.parse("anthropic:fast-y")
+    assert prompts.reviewers["ExpositionReferee"].model == ModelRef.parse("anthropic:fast-y")
+    assert prompts.strong_model == ModelRef.parse("anthropic:strong-x")
+
+
+def test_load_prompts_rejects_unqualified_programmatic_model():
+    with pytest.raises(ConfigurationError, match="PROVIDER:MODEL.*--preset"):
+        load_prompts(strong_model="strong-x")
 
 
 def test_load_prompts_accepts_mixed_provider_models():
@@ -774,7 +790,7 @@ def test_a_truncated_call_bills_at_most_max_attempts():
             issues=[],
             global_context="ctx",
             system_prompt="be a referee",
-            model=ModelRef.parse("strong"),
+            model=ModelRef.parse("anthropic:strong"),
             effort="high",
         )
     assert len(referee.create_calls) == MAX_ATTEMPTS_PER_CALL
@@ -805,7 +821,7 @@ def test_final_referee_retries_a_truncated_synthesis():
         issues=[],
         global_context="ctx",
         system_prompt="be a referee",
-        model=ModelRef.parse("strong"),
+        model=ModelRef.parse("anthropic:strong"),
         effort="high",
     )
     assert report.startswith("# Summary")
@@ -849,47 +865,47 @@ def test_validate_settings_rejects_an_unknown_effort_level():
 def test_validate_settings_rejects_disabled_thinking_on_a_capped_model(effort):
     """Opus 5 refuses thinking:disabled above `high`, and both thinking-off reviewers
     would land there if someone pointed --fast-model at it."""
-    prompts = load_prompts(fast_model="claude-opus-5")
+    prompts = load_prompts(fast_model="anthropic:claude-opus-5")
     with pytest.raises(ConfigurationError, match="runs without thinking"):
         validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
 def test_validate_settings_allows_a_capped_model_at_lower_effort(effort):
-    prompts = load_prompts(fast_model="claude-opus-5")
+    prompts = load_prompts(fast_model="anthropic:claude-opus-5")
     validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
 
 
 def test_validate_settings_rejects_a_model_that_cannot_take_effort_at_all():
-    prompts = load_prompts(fast_model="claude-haiku-4-5")
+    prompts = load_prompts(fast_model="anthropic:claude-haiku-4-5")
     with pytest.raises(ConfigurationError, match="cannot be used here"):
         validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="high")
 
 
 def test_validate_settings_rejects_an_effort_the_model_lacks():
     """xhigh arrived with Opus 4.7; 4.6 accepts only low/medium/high/max."""
-    prompts = load_prompts(strong_model="claude-opus-4-6")
+    prompts = load_prompts(strong_model="anthropic:claude-opus-4-6")
     with pytest.raises(ConfigurationError, match="does not support --effort xhigh"):
         validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="xhigh")
 
 
 def test_validate_settings_ignores_models_it_has_no_table_entry_for():
-    prompts = load_prompts(strong_model="some-future-model")
+    prompts = load_prompts(strong_model="anthropic:some-future-model")
     validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="max")
 
 
-def test_state_settings_keep_anthropic_bare_and_qualify_openai():
-    old_style = run_settings(load_prompts(), DEFAULT_MAX_TOKENS, "high")
-    assert set(old_style["models"].values()) == {
-        "claude-opus-5",
-        "claude-sonnet-5",
+def test_state_settings_qualify_every_provider_model():
+    defaults = run_settings(load_prompts(), DEFAULT_MAX_TOKENS, "high")
+    assert set(defaults["models"].values()) == {
+        "anthropic:claude-opus-5",
+        "anthropic:claude-sonnet-5",
     }
 
     mixed = run_settings(
         load_prompts(strong_model="openai:gpt-5.6-sol"), DEFAULT_MAX_TOKENS, "high"
     )
     assert mixed["models"]["FormalVerifier"] == "openai:gpt-5.6-sol"
-    assert mixed["models"]["ExpositionReferee"] == "claude-sonnet-5"
+    assert mixed["models"]["ExpositionReferee"] == "anthropic:claude-sonnet-5"
 
 
 def test_validate_settings_rejects_unknown_provider():
@@ -909,13 +925,13 @@ def test_default_priced_models_can_actually_be_driven():
 def test_check_access_reports_a_rate_limit_instead_of_raising_it():
     client = FakeProvider(ProviderRateLimitError("slow down"))
     with pytest.raises(ConfigurationError, match="Rate limited"):
-        check_access(registry(client), [ModelRef.parse("strong")])
+        check_access(registry(client), [ModelRef.parse("anthropic:strong")])
 
 
 def test_check_access_reports_a_server_error_instead_of_raising_it():
     client = FakeProvider(ProviderServerError("boom", status_code=500))
     with pytest.raises(ConfigurationError, match="returned 500"):
-        check_access(registry(client), [ModelRef.parse("strong")])
+        check_access(registry(client), [ModelRef.parse("anthropic:strong")])
 
 
 # ------------------------------------------------------------------------- masking
@@ -1052,7 +1068,9 @@ def test_mixed_providers_route_reviewers_and_final_referee_by_tier(tmp_path):
     source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
     anthropic_provider = FakeProvider(issues_per_call=1)
     openai_provider = FakeOpenAIProvider(issues_per_call=1)
-    prompts = load_prompts(strong_model="openai:gpt-5.6-sol", fast_model="claude-sonnet-5")
+    prompts = load_prompts(
+        strong_model="openai:gpt-5.6-sol", fast_model="anthropic:claude-sonnet-5"
+    )
 
     result = run_pipeline(
         registry(anthropic_provider, openai_provider),
@@ -1311,7 +1329,20 @@ def test_resume_refuses_when_a_reviewer_prompt_changed(tmp_path):
 def test_resume_refuses_when_the_models_changed(tmp_path):
     review(tmp_path, sections(*THREE))
     with pytest.raises(ConfigurationError, match="different settings"):
-        review(tmp_path, sections(*THREE), models={"strong_model": "claude-opus-4-7"})
+        review(
+            tmp_path,
+            sections(*THREE),
+            models={"strong_model": "anthropic:claude-opus-4-7"},
+        )
+
+
+def test_resume_refuses_old_bare_anthropic_state_as_different_settings(tmp_path):
+    review(tmp_path, sections(*THREE))
+    state = tmp_path / "out" / "state.json"
+    state.write_text(state.read_text(encoding="utf-8").replace("anthropic:", ""), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="different settings"):
+        review(tmp_path, sections(*THREE))
 
 
 def test_resume_refuses_when_the_provider_changes(tmp_path):
@@ -1364,7 +1395,7 @@ def test_the_coverage_note_is_not_filed_under_detected_issues(tmp_path):
         issues=[issue("major")],
         global_context="ctx",
         system_prompt="referee",
-        model=ModelRef.parse("strong"),
+        model=ModelRef.parse("anthropic:strong"),
         coverage_note=format_coverage_note([Failure("Intro", "FormalVerifier", "boom")]),
     )
     assert report.startswith("# Summary")
