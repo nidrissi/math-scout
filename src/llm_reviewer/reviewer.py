@@ -10,17 +10,37 @@ from enum import StrEnum
 from pathlib import Path
 from textwrap import indent
 
-import anthropic
 from pydantic import BaseModel
 from rich import print
+
+from .providers import (
+    EFFORT_LEVELS,
+    FATAL_PROVIDER_ERRORS,
+    TRANSIENT_PROVIDER_ERRORS,
+    ConfigurationError,
+    GenerationRequest,
+    GenerationResult,
+    ModelRef,
+    PromptBlock,
+    ProviderAuthenticationError,
+    ProviderConnectionError,
+    ProviderModelError,
+    ProviderPermissionError,
+    ProviderRateLimitError,
+    ProviderRegistry,
+    ProviderRequestError,
+    ProviderServerError,
+    ProviderTimeoutError,
+    next_lower_effort,
+    provider_type,
+)
 
 DEFAULT_MODEL_STRONG = "claude-opus-5"
 DEFAULT_MODEL_FAST = "claude-sonnet-5"
 
-# Every call streams, so `max_tokens` is bounded by what the model will emit rather than
-# by the SDK's ten-minute non-streaming timeout (which capped it at 21_333). Every model
-# in MODEL_SUPPORT allows at least 64K output tokens (128K on the Opus 5 and Sonnet 5
-# families), so this is a typo guard rather than a limit anyone meets in practice.
+# Every call streams, so `max_tokens` is bounded by provider model capabilities rather
+# than an SDK's non-streaming timeout. This application ceiling remains a typo guard;
+# adapters may impose a lower known model-specific limit during settings validation.
 MAX_OUTPUT_TOKENS = 64_000
 
 # Thinking shares this budget with the response. Reviewers reading a 20k-character
@@ -35,26 +55,7 @@ DEFAULT_MAX_TOKENS = 32_000
 # `test_a_truncated_call_bills_at_most_max_attempts` is what keeps them honest.
 MAX_ATTEMPTS_PER_CALL = 2
 
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_EFFORT = "high"
-_ALL_EFFORTS = frozenset(EFFORT_LEVELS)
-
-# The two thinking configurations the pipeline uses, spelled out once.
-THINKING_ADAPTIVE: anthropic.types.ThinkingConfigParam = {"type": "adaptive"}
-THINKING_DISABLED: anthropic.types.ThinkingConfigParam = {"type": "disabled"}
-
-# USD per million tokens. Cache reads are 0.1x the input rate.
-# Models absent from this table still work; only cost estimation is unavailable.
-# Sonnet 5 is listed at its standard rate; an introductory $2/$10 runs to 2026-08-31,
-# so estimates are deliberately conservative until then.
-MODEL_PRICING = {
-    "claude-opus-5": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
-    "claude-opus-4-8": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
-    "claude-opus-4-7": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
-    "claude-opus-4-6": {"input": 5.0, "output": 25.0, "cache_read": 0.5},
-    "claude-sonnet-5": {"input": 3.0, "output": 15.0, "cache_read": 0.3},
-    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0, "cache_read": 0.3},
-}
 
 ROOT = Path(__file__).parent.resolve()
 PROMPTS = ROOT / "prompts"
@@ -101,24 +102,6 @@ FRONT_MATTER_NAME = "Front matter"
 # document, so it goes through the same chunk machinery — files, hashing, resume — as a
 # real section.
 WHOLE_PAPER_NAME = "(whole paper)"
-
-
-CREDENTIALS_HELP = (
-    "No usable Anthropic credentials. Either export ANTHROPIC_API_KEY, or sign in with "
-    "`ant auth login` and the SDK will pick up the stored profile."
-)
-
-# Errors that will recur identically on every subsequent call, so there is no point
-# continuing the run: a rejected key, a revoked permission, an unknown model ID.
-FATAL_API_ERRORS = (
-    anthropic.AuthenticationError,
-    anthropic.PermissionDeniedError,
-    anthropic.NotFoundError,
-)
-
-
-class ConfigurationError(Exception):
-    """A problem with the input, environment, or invocation — not an API failure."""
 
 
 @dataclass
@@ -170,31 +153,6 @@ class Review(BaseModel):
     issues: list[Issue]
 
 
-@dataclass(frozen=True)
-class ModelSupport:
-    """What a model accepts of the request shape this pipeline always sends."""
-
-    efforts: frozenset[str]  # empty means the model rejects output_config.effort entirely
-    # Highest effort at which an explicitly disabled thinking config is still accepted.
-    # None means no restriction.
-    disabled_thinking_max_effort: str | None = None
-
-
-# Every call carries both an effort level and an explicit thinking config, so a model
-# that rejects either cannot be driven here. Models absent from this table are passed
-# through unchecked and the API reports any problem itself.
-MODEL_SUPPORT: dict[str, ModelSupport] = {
-    "claude-opus-5": ModelSupport(_ALL_EFFORTS, disabled_thinking_max_effort="high"),
-    "claude-opus-4-8": ModelSupport(_ALL_EFFORTS),
-    "claude-opus-4-7": ModelSupport(_ALL_EFFORTS),
-    "claude-opus-4-6": ModelSupport(_ALL_EFFORTS - {"xhigh"}),
-    "claude-sonnet-5": ModelSupport(_ALL_EFFORTS),
-    "claude-sonnet-4-6": ModelSupport(_ALL_EFFORTS - {"xhigh"}),
-    # Haiku 4.5 rejects output_config.effort and has no adaptive thinking mode.
-    "claude-haiku-4-5": ModelSupport(frozenset()),
-}
-
-
 class ReviewerScope(StrEnum):
     """How much of the document a reviewer is shown at once."""
 
@@ -217,14 +175,10 @@ class ReviewerConfig:
     """A reviewer resolved against a concrete model, with its prompt text loaded."""
 
     name: str
-    model: str
+    model: ModelRef
     prompt_text: str
     thinking: bool
     scope: ReviewerScope = ReviewerScope.SECTION
-
-    @property
-    def thinking_config(self) -> anthropic.types.ThinkingConfigParam:
-        return THINKING_ADAPTIVE if self.thinking else THINKING_DISABLED
 
 
 @dataclass(frozen=True)
@@ -238,7 +192,7 @@ class LoadedPrompts:
     # rather than looked up through a reviewer name, which would break on a rename. No
     # default: it must agree with the strong reviewers' models, and only load_prompts
     # is in a position to make that true.
-    strong_model: str
+    strong_model: ModelRef
 
     def scoped(self, scope: ReviewerScope) -> dict[str, ReviewerConfig]:
         """The reviewers that run at *scope*, in their declared order."""
@@ -308,11 +262,11 @@ def _read_prompt(filename: str) -> str:
 
 
 def load_prompts(
-    strong_model: str = DEFAULT_MODEL_STRONG,
-    fast_model: str = DEFAULT_MODEL_FAST,
+    strong_model: str | ModelRef = DEFAULT_MODEL_STRONG,
+    fast_model: str | ModelRef = DEFAULT_MODEL_FAST,
 ) -> LoadedPrompts:
     """Read every prompt file up front so a missing one fails before any API spending."""
-    models = {"strong": strong_model, "fast": fast_model}
+    models = {"strong": ModelRef.parse(strong_model), "fast": ModelRef.parse(fast_model)}
     reviewers = {
         name: ReviewerConfig(
             name=name,
@@ -327,7 +281,7 @@ def load_prompts(
         reviewers=reviewers,
         final_referee=_read_prompt(FINAL_REFEREE_PROMPT),
         review_protocol=_read_prompt(REVIEW_PROTOCOL_PROMPT),
-        strong_model=strong_model,
+        strong_model=models["strong"],
     )
 
 
@@ -345,81 +299,80 @@ def validate_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> N
             f"--effort must be one of {', '.join(EFFORT_LEVELS)}; got {effort!r}."
         )
 
-    for reviewer in sorted(prompts.reviewers.values(), key=lambda r: r.name):
-        support = MODEL_SUPPORT.get(reviewer.model)
-        if support is None:
-            continue
-
-        if not support.efforts:
-            raise ConfigurationError(
-                f"{reviewer.model} cannot be used here: it rejects the effort and "
-                "thinking settings this pipeline sends on every call. Choose another "
-                "model for it."
+    requests = [
+        (reviewer.name, reviewer.model, reviewer.thinking)
+        for reviewer in prompts.reviewers.values()
+    ]
+    requests.append(("FinalReferee", prompts.strong_model, True))
+    for reviewer_name, model, reasoning in sorted(requests, key=lambda item: item[0]):
+        try:
+            adapter = provider_type(model.provider)
+            adapter.validate_request(
+                model.model,
+                reasoning=reasoning,
+                effort=effort,
+                output_limit=max_tokens,
             )
-        if effort not in support.efforts:
-            allowed = ", ".join(level for level in EFFORT_LEVELS if level in support.efforts)
-            raise ConfigurationError(
-                f"{reviewer.model} (used by {reviewer.name}) does not support --effort "
-                f"{effort}. It accepts: {allowed}."
-            )
-
-        cap = support.disabled_thinking_max_effort
-        if (
-            not reviewer.thinking
-            and cap is not None
-            and EFFORT_LEVELS.index(effort) > EFFORT_LEVELS.index(cap)
-        ):
-            raise ConfigurationError(
-                f"{reviewer.name} runs without thinking, which {reviewer.model} rejects "
-                f"above --effort {cap}. Use --effort {cap} or lower, or give it a "
-                "different model."
-            )
+        except ConfigurationError as exc:
+            message = str(exc)
+            if reviewer_name not in message:
+                message += f" (used by {reviewer_name})"
+            raise ConfigurationError(message) from exc
 
 
-def check_access(client: anthropic.Anthropic, models: list[str]) -> None:
+def check_access(providers: ProviderRegistry, models: list[ModelRef]) -> None:
     """Verify credentials and every model ID before the run spends anything.
 
     Token counting is free, so this costs one round trip per distinct model and turns
     what would otherwise be dozens of identical mid-run failures into one clear message.
     """
     for model in sorted(set(models)):
+        provider = providers.for_model(model)
         try:
             # Retry briefly so a rate limit or a momentary 5xx is a short wait rather
             # than a failed pre-flight.
             _call_with_retry(
-                lambda model=model: client.messages.count_tokens(
-                    model=model,
-                    messages=[{"role": "user", "content": "ping"}],
-                ),
+                lambda model=model, provider=provider: provider.preflight(model.model),
                 retries=1,
                 base_delay=2.0,
             )
-        except TypeError as exc:
-            # The SDK raises a bare TypeError when it cannot resolve any credential.
-            raise ConfigurationError(CREDENTIALS_HELP) from exc
-        except anthropic.AuthenticationError as exc:
+        except ProviderAuthenticationError as exc:
             raise ConfigurationError(
-                f"{CREDENTIALS_HELP} The credential that was found was rejected: {exc}"
+                f"{provider.credentials_help} The credential that was found was rejected: {exc}"
             ) from exc
-        except anthropic.PermissionDeniedError as exc:
+        except ProviderPermissionError as exc:
             raise ConfigurationError(
-                f"These credentials are not allowed to use {model!r}: {exc}"
+                f"These {provider.display_name} credentials are not allowed to use "
+                f"{model.qualified!r}: {exc}"
             ) from exc
-        except anthropic.NotFoundError as exc:
+        except ProviderModelError as exc:
             raise ConfigurationError(
-                f"Model {model!r} is not available to this account. Check the ID against "
-                f"https://platform.claude.com/docs/en/about-claude/models/overview ({exc})"
+                f"Model {model.qualified!r} is not available to this account. Check the ID "
+                f"against {provider.models_url} ({exc})"
             ) from exc
-        except anthropic.APIConnectionError as exc:
-            raise ConfigurationError(f"Cannot reach the Anthropic API: {exc}") from exc
-        except anthropic.RateLimitError as exc:
+        except ProviderConnectionError as exc:
             raise ConfigurationError(
-                f"Rate limited while checking access to {model!r}; try again shortly. {exc}"
+                f"Cannot reach the {provider.display_name} API: {exc}"
             ) from exc
-        except anthropic.APIStatusError as exc:
-            # Anything else the API rejected or failed on, including 5xx after retries.
+        except ProviderTimeoutError as exc:
             raise ConfigurationError(
-                f"The API returned {exc.status_code} while checking access to {model!r}: {exc}"
+                f"Timed out while checking {model.qualified!r}: {exc}"
+            ) from exc
+        except ProviderRateLimitError as exc:
+            raise ConfigurationError(
+                f"Rate limited while checking access to {model.qualified!r}; "
+                f"try again shortly. {exc}"
+            ) from exc
+        except ProviderServerError as exc:
+            status = exc.status_code if exc.status_code is not None else "a server error"
+            raise ConfigurationError(
+                f"The {provider.display_name} API returned {status} while checking access "
+                f"to {model.qualified!r}: {exc}"
+            ) from exc
+        except ProviderRequestError as exc:
+            raise ConfigurationError(
+                f"The {provider.display_name} API rejected the access check for "
+                f"{model.qualified!r}: {exc}"
             ) from exc
 
 
@@ -441,49 +394,25 @@ def chunk_stem(index: int, chunk: Chunk) -> str:
     return f"{index:03d}_{_safe_filename(chunk.name)}"
 
 
-def extract_text(response) -> str:
-    """Concatenate all text blocks from a Claude response, warning on unexpected block types."""
-    texts = []
-    for block in response.content:
-        if block.type == "text":
-            texts.append(block.text)
-        elif block.type in ("thinking", "redacted_thinking"):
-            # Expected whenever thinking is on; the report itself is in the text blocks.
-            continue
-        else:
-            print(f"[yellow]Unexpected content block type {block.type!r}: {block}[/yellow]")
-    if not texts:
-        raise ValueError(f"No text block in response (stop_reason={response.stop_reason!r})")
-    if response.stop_reason == "max_tokens":
-        print("[yellow]Warning: response was truncated (stop_reason=max_tokens).[/yellow]")
-    return "".join(texts)
-
-
 def _call_with_retry(fn, retries: int = 3, base_delay: float = 5.0):
-    """Call *fn* with exponential-backoff retries on transient API and server errors."""
+    """Call *fn* with exponential backoff on normalized transient provider errors."""
     for attempt in range(retries + 1):
         try:
             return fn()
-        except (
-            anthropic.RateLimitError,
-            anthropic.APIConnectionError,
-            anthropic.APITimeoutError,
-        ) as exc:
+        except TRANSIENT_PROVIDER_ERRORS as exc:
             if attempt == retries:
                 raise
             delay = base_delay * (2**attempt)
-            print(
-                f"[yellow]Transient error ({exc.__class__.__name__}), "
-                f"retrying in {delay:.0f}s…[/yellow]"
-            )
-            time.sleep(delay)
-        except anthropic.APIStatusError as exc:
-            if exc.status_code >= 500 and attempt < retries:
-                delay = base_delay * (2**attempt)
-                print(f"[yellow]Server error {exc.status_code}, retrying in {delay:.0f}s…[/yellow]")
-                time.sleep(delay)
+            if isinstance(exc, ProviderServerError):
+                detail = (
+                    f"server error {exc.status_code}"
+                    if exc.status_code is not None
+                    else "server error"
+                )
             else:
-                raise
+                detail = exc.__class__.__name__
+            print(f"[yellow]Transient error ({detail}), retrying in {delay:.0f}s…[/yellow]")
+            time.sleep(delay)
     raise RuntimeError("unreachable")
 
 
@@ -837,7 +766,7 @@ def _build_system(
     global_context: str,
     system_prompt: str,
     review_protocol: str | None = None,
-) -> list[anthropic.types.TextBlockParam]:
+) -> list[PromptBlock]:
     """Build the system prompt list with a cache breakpoint on every stable block.
 
     The global context and the review protocol are byte-identical across reviewers, so
@@ -845,27 +774,19 @@ def _build_system(
     rather than writing four. The final referee passes *review_protocol* as None — the
     protocol describes the JSON issue schema, and the referee's contract is markdown.
     """
-    blocks: list[anthropic.types.TextBlockParam] = [
-        {
-            "type": "text",
-            "text": f"# GLOBAL CONTEXT\n{global_context}",
-            "cache_control": {"type": "ephemeral"},
-        },
+    blocks = [
+        PromptBlock(role="system", text=f"# GLOBAL CONTEXT\n{global_context}", cacheable=True),
     ]
     if review_protocol is not None:
         blocks.append(
-            {
-                "type": "text",
-                "text": "# REVIEW PROTOCOL\n" + review_protocol,
-                "cache_control": {"type": "ephemeral"},
-            }
+            PromptBlock(
+                role="system",
+                text="# REVIEW PROTOCOL\n" + review_protocol,
+                cacheable=True,
+            )
         )
     blocks.append(
-        {
-            "type": "text",
-            "text": "# REVIEWER PROMPT\n" + system_prompt,
-            "cache_control": {"type": "ephemeral"},
-        }
+        PromptBlock(role="system", text="# REVIEWER PROMPT\n" + system_prompt, cacheable=True)
     )
     return blocks
 
@@ -874,89 +795,48 @@ def _build_messages(
     known_issues: str,
     to_review: str,
     preamble: str = "",
-) -> list[anthropic.types.MessageParam]:
+) -> list[PromptBlock]:
     """Assemble the user turn: an optional preamble, the known issues, then the target.
 
     The preamble is its own block rather than a prefix on the issue list, so a note about
     failed reviewer calls is not presented under the `DETECTED ISSUES` heading as though
     it were a finding.
     """
-    content: list[anthropic.types.TextBlockParam] = []
+    content: list[PromptBlock] = []
     if preamble:
-        content.append({"type": "text", "text": preamble})
-    content.append({"type": "text", "text": f"# DETECTED ISSUES\n{known_issues}"})
-    content.append({"type": "text", "text": to_review})
-    return [{"role": "user", "content": content}]
+        content.append(PromptBlock(role="user", text=preamble))
+    content.append(PromptBlock(role="user", text=f"# DETECTED ISSUES\n{known_issues}"))
+    content.append(PromptBlock(role="user", text=to_review))
+    return content
 
 
-def _api_call_with_schema(
-    client: anthropic.Anthropic,
-    model: str,
+def _generation_request(
+    model: ModelRef,
     system_prompt: str,
     global_context: str,
     known_issues: str,
     to_review: str,
-    max_tokens: int,
-    thinking: anthropic.types.ThinkingConfigParam,
+    *,
+    reasoning: bool,
     effort: str,
-    review_protocol: str | None = None,
-):
-    # The SDK merges output_format into output_config, so passing both is supported.
-    # `stream` is what lifts max_tokens off the non-streaming ceiling; its
-    # get_final_message() still returns a ParsedMessage, so `.parsed_output` is unchanged.
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=_build_system(global_context, system_prompt, review_protocol),
-        messages=_build_messages(known_issues, to_review),
-        thinking=thinking,
-        output_config={"effort": effort},
-        output_format=Review,
-    ) as stream:
-        return stream.get_final_message()
-
-
-def _api_call(
-    client: anthropic.Anthropic,
-    model: str,
-    system_prompt: str,
-    global_context: str,
-    known_issues: str,
-    to_review: str,
     max_tokens: int,
-    thinking: anthropic.types.ThinkingConfigParam,
-    effort: str,
-    review_protocol: str | None = None,
-    preamble: str = "",
-):
-    with client.messages.stream(
-        model=model,
-        max_tokens=max_tokens,
-        system=_build_system(global_context, system_prompt, review_protocol),
-        messages=_build_messages(known_issues, to_review, preamble),
-        thinking=thinking,
-        output_config={"effort": effort},
-    ) as stream:
-        return stream.get_final_message()
-
-
-def _count_tokens(
-    client: anthropic.Anthropic,
-    model: str,
-    system_prompt: str,
-    global_context: str,
-    known_issues: str,
-    to_review: str,
     with_schema: bool,
     review_protocol: str | None = None,
-) -> int:
-    """Return the input-token count for one API call without generating a response."""
-    return client.messages.count_tokens(
+    preamble: str = "",
+    prompt_cache_key: str | None = None,
+) -> GenerationRequest:
+    return GenerationRequest(
         model=model,
-        system=_build_system(global_context, system_prompt, review_protocol),
-        messages=_build_messages(known_issues, to_review),
-        output_format=Review if with_schema else anthropic.omit,
-    ).input_tokens
+        blocks=tuple(
+            _build_system(global_context, system_prompt, review_protocol)
+            + _build_messages(known_issues, to_review, preamble)
+        ),
+        reasoning=reasoning,
+        effort=effort,
+        output_limit=max_tokens,
+        output_schema=Review if with_schema else None,
+        prompt_cache_key=prompt_cache_key,
+    )
 
 
 def _format_review_target(chunk: Chunk, scope: ReviewerScope) -> str:
@@ -979,12 +859,17 @@ def lower_effort(effort: str) -> str | None:
     Lowering effort is always allowed: `disabled_thinking_max_effort` is an upper bound,
     so no model that accepted a level can reject the one below it.
     """
-    index = EFFORT_LEVELS.index(effort)
-    return EFFORT_LEVELS[index - 1] if index > 0 else None
+    return next_lower_effort(effort)
+
+
+def prompt_cache_key(tex: str) -> str:
+    """Return a deterministic, paper-specific cache-routing key."""
+    digest = hashlib.sha256(tex.encode("utf-8")).hexdigest()[:32]
+    return f"llm-reviewer:{digest}"
 
 
 def call_reviewer(
-    client: anthropic.Anthropic,
+    providers: ProviderRegistry,
     reviewer: ReviewerConfig,
     chunk: Chunk,
     global_context: str,
@@ -992,6 +877,7 @@ def call_reviewer(
     review_protocol: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
+    cache_key: str | None = None,
 ):
     """Send a chunk to a reviewer and return its parsed JSON issue report.
 
@@ -1001,42 +887,40 @@ def call_reviewer(
     section's coverage entirely.
     """
 
-    def attempt(at_effort: str):
-        return _call_with_retry(
-            lambda: _api_call_with_schema(
-                client=client,
-                model=reviewer.model,
-                system_prompt=reviewer.prompt_text,
-                global_context=global_context,
-                known_issues=known_issues,
-                to_review=_format_review_target(chunk, reviewer.scope),
-                max_tokens=max_tokens,
-                thinking=reviewer.thinking_config,
-                effort=at_effort,
-                review_protocol=review_protocol,
-            )
-        )
+    provider = providers.for_model(reviewer.model)
+    cache_key = prompt_cache_key(global_context) if cache_key is None else cache_key
 
-    response = attempt(effort)
+    def attempt(at_effort: str) -> tuple[GenerationRequest, GenerationResult]:
+        request = _generation_request(
+            model=reviewer.model,
+            system_prompt=reviewer.prompt_text,
+            global_context=global_context,
+            known_issues=known_issues,
+            to_review=_format_review_target(chunk, reviewer.scope),
+            reasoning=reviewer.thinking,
+            effort=at_effort,
+            max_tokens=max_tokens,
+            with_schema=True,
+            review_protocol=review_protocol,
+            prompt_cache_key=cache_key,
+        )
+        return request, _call_with_retry(lambda: provider.generate(request))
+
+    request, response = attempt(effort)
 
     # Thinking shares the max_tokens budget with the response, so a truncated reply is a
     # realistic failure rather than a theoretical one. One step down, then give up: if a
     # whole level of thinking did not free enough budget, the budget is what is short.
-    retry_effort = lower_effort(effort)
-    if (
-        (not response or not response.parsed_output)
-        and response is not None
-        and response.stop_reason == "max_tokens"
-        and retry_effort is not None
-    ):
+    retry_effort = provider.retry_effort(request)
+    if response.parsed is None and response.truncated and retry_effort is not None:
         print(
             f"[yellow]  {reviewer.name} exhausted {max_tokens:,} tokens on "
             f"'{chunk.name}' at --effort {effort}; retrying at {retry_effort}.[/yellow]"
         )
-        response = attempt(retry_effort)
+        _, response = attempt(retry_effort)
 
-    if not response or not response.parsed_output:
-        if response is not None and response.stop_reason == "max_tokens":
+    if response.parsed is None:
+        if response.truncated:
             raise ValueError(
                 f"{reviewer.name} hit the {max_tokens:,}-token limit on section "
                 f"'{chunk.name}' before finishing its JSON. Raise --max-tokens (up to "
@@ -1046,7 +930,12 @@ def call_reviewer(
             f"No parsed output from reviewer {reviewer.name} on section '{chunk.name}'"
         )
 
-    return response.parsed_output
+    if not isinstance(response.parsed, Review):
+        raise TypeError(
+            f"Provider returned {type(response.parsed).__name__}, expected Review for "
+            f"{reviewer.name}."
+        )
+    return response.parsed
 
 
 def append_issues(issues: list[IssueWithReviewer], issues_file: Path) -> None:
@@ -1057,49 +946,60 @@ def append_issues(issues: list[IssueWithReviewer], issues_file: Path) -> None:
 
 
 def run_final_referee(
-    client: anthropic.Anthropic,
+    providers: ProviderRegistry,
     tex: str,
     issues: list[IssueWithReviewer],
     global_context: str,
     system_prompt: str,
-    model: str,
+    model: ModelRef,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
     coverage_note: str = "",
+    cache_key: str | None = None,
 ) -> str:
     """Synthesize a markdown referee report from the paper and the collected issues."""
 
     # This pass weighs and prioritises every finding across the whole paper, so it
     # thinks — and it runs once per review, so the extra cost is marginal.
-    def attempt(at_effort: str):
-        return _call_with_retry(
-            lambda: _api_call(
-                client=client,
-                model=model,
-                system_prompt=system_prompt,
-                global_context=global_context,
-                known_issues=format_all_issues(issues),
-                to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
-                max_tokens=max_tokens,
-                thinking=THINKING_ADAPTIVE,
-                effort=at_effort,
-                preamble=coverage_note,
-            )
-        )
+    provider = providers.for_model(model)
+    cache_key = prompt_cache_key(tex) if cache_key is None else cache_key
 
-    response = attempt(effort)
+    def attempt(at_effort: str) -> tuple[GenerationRequest, GenerationResult]:
+        request = _generation_request(
+            model=model,
+            system_prompt=system_prompt,
+            global_context=global_context,
+            known_issues=format_all_issues(issues),
+            to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
+            reasoning=True,
+            effort=at_effort,
+            max_tokens=max_tokens,
+            with_schema=False,
+            preamble=coverage_note,
+            prompt_cache_key=cache_key,
+        )
+        return request, _call_with_retry(lambda: provider.generate(request))
+
+    request, response = attempt(effort)
 
     # This call reads the whole paper and every issue, so it is the likeliest of all of
     # them to think past the budget. Losing it loses the report, which is the deliverable.
-    retry_effort = lower_effort(effort)
-    if response.stop_reason == "max_tokens" and retry_effort is not None:
+    retry_effort = provider.retry_effort(request)
+    if response.truncated and retry_effort is not None:
         print(
             f"[yellow]Final referee exhausted {max_tokens:,} tokens at --effort "
             f"{effort}; retrying at {retry_effort}.[/yellow]"
         )
-        response = attempt(retry_effort)
+        _, response = attempt(retry_effort)
 
-    return extract_text(response)
+    if response.truncated:
+        raise ValueError(
+            f"Final referee hit the {max_tokens:,}-token limit before finishing. Raise "
+            f"--max-tokens (up to {MAX_OUTPUT_TOKENS:,}) or lower --effort."
+        )
+    if response.text is None:
+        raise ValueError("No text output from the final referee.")
+    return response.text
 
 
 def _prepare(tex_path: str) -> tuple[str, list[Chunk], str]:
@@ -1155,7 +1055,7 @@ def prompts_digest(prompts: LoadedPrompts) -> str:
 def run_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> dict:
     """The knobs that change what a reviewer would say, recorded so resume can compare."""
     return {
-        "models": {name: r.model for name, r in sorted(prompts.reviewers.items())},
+        "models": {name: r.model.state_id for name, r in sorted(prompts.reviewers.items())},
         "max_tokens": max_tokens,
         "effort": effort,
         "prompts": prompts_digest(prompts),
@@ -1336,7 +1236,7 @@ def _confirm(assume_yes: bool) -> bool:
 
 
 def run_pipeline(
-    client: anthropic.Anthropic,
+    providers: ProviderRegistry,
     tex_path: str,
     output_dir: Path | str | None = None,
     prompts: LoadedPrompts | None = None,
@@ -1349,6 +1249,7 @@ def run_pipeline(
 
     # Validate the input before creating anything, so a typo'd path leaves no litter.
     tex, chunks, global_context = _prepare(tex_path)
+    cache_key = prompt_cache_key(tex)
 
     output_dir = Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
     reviews_dir = output_dir / "reviews"
@@ -1461,7 +1362,7 @@ def run_pipeline(
 
             try:
                 review = call_reviewer(
-                    client=client,
+                    providers=providers,
                     reviewer=reviewer,
                     chunk=chunk,
                     global_context=global_context,
@@ -1469,8 +1370,9 @@ def run_pipeline(
                     review_protocol=prompts.review_protocol,
                     max_tokens=max_tokens,
                     effort=effort,
+                    cache_key=cache_key,
                 )
-            except FATAL_API_ERRORS as exc:
+            except FATAL_PROVIDER_ERRORS as exc:
                 # Credentials or the model itself are wrong, so every remaining call
                 # would fail identically. Stop rather than burn through the whole paper.
                 print(f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]")
@@ -1540,7 +1442,7 @@ def run_pipeline(
     print("[bold blue]Running final referee synthesis...[/bold blue]")
     try:
         final_report = run_final_referee(
-            client=client,
+            providers=providers,
             tex=tex,
             issues=all_issues,
             global_context=global_context,
@@ -1549,7 +1451,19 @@ def run_pipeline(
             max_tokens=max_tokens,
             effort=effort,
             coverage_note=format_coverage_note(result.failures),
+            cache_key=cache_key,
         )
+    except FATAL_PROVIDER_ERRORS as exc:
+        result.fatal_error = (
+            f"Aborting: {type(exc).__name__} from the API means every remaining call "
+            f"would fail the same way. {exc}"
+        )
+        print(f"[red]ERROR: final referee synthesis failed: {exc}[/red]")
+        print(
+            f"[yellow]Collected issues are preserved in {all_issues_path}; "
+            "fix the problem and re-run the same command to resume.[/yellow]"
+        )
+        return result
     except Exception as exc:
         print(f"[red]ERROR: final referee synthesis failed: {exc}[/red]")
         print(
@@ -1572,47 +1486,51 @@ def run_pipeline(
 
 
 def run_dry_run(
-    client: anthropic.Anthropic,
+    providers: ProviderRegistry,
     tex_path: str,
     prompts: LoadedPrompts | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
-    # Accepted for symmetry with run_pipeline; effort does not change input token counts.
     effort: str = DEFAULT_EFFORT,
 ) -> None:
-    """Count input tokens and estimate cost without sending any generation requests."""
+    """Count exact request inputs and optionally estimate cost, without generation."""
     prompts = load_prompts() if prompts is None else prompts
 
     print("[yellow]DRY RUN — token counting only, no generation requests will be sent.[/yellow]")
     print(
-        "[yellow]Warning: rough lower-bound estimate. The 'known issues' context fed to each "
-        "reviewer (which grows as earlier reviewers produce output) is not counted here "
-        "because it depends on actual generation. Nor is the second attempt a truncated "
-        "call makes, though it re-sends the same prefix seconds later and so should mostly "
-        "be a cache hit. Real input cost will also be lower than "
-        "shown once prompt caching kicks in (cache reads are 90 % cheaper).[/yellow]\n"
+        "[yellow]Each displayed count is exact for the request shown to the provider. "
+        "The run total remains a lower bound because the known-issues block grows from "
+        "generated findings, which do not exist during a dry run. Cost estimates also "
+        "exclude unpriced models and do not predict provider-specific cache hits.[/yellow]\n"
     )
 
     tex, chunks, global_context = _prepare(tex_path)
     empty_known_issues = summarize_known_issues([])
+    cache_key = prompt_cache_key(tex)
+    token_totals: dict[ModelRef, int] = {}
+    call_counts: dict[ModelRef, int] = {}
 
-    token_totals: dict[str, int] = {}
-    call_counts: dict[str, int] = {}
-
-    def record(model: str, tokens: int) -> None:
+    def record(model: ModelRef, tokens: int) -> None:
         token_totals[model] = token_totals.get(model, 0) + tokens
         call_counts[model] = call_counts.get(model, 0) + 1
 
+    def count_request(request: GenerationRequest) -> int:
+        return providers.for_model(request.model).count_tokens(request)
+
     def count_reviewer(chunk: Chunk, reviewer: ReviewerConfig) -> None:
-        n = _count_tokens(
-            client,
-            reviewer.model,
-            reviewer.prompt_text,
-            global_context,
-            empty_known_issues,
-            _format_review_target(chunk, reviewer.scope),
+        request = _generation_request(
+            model=reviewer.model,
+            system_prompt=reviewer.prompt_text,
+            global_context=global_context,
+            known_issues=empty_known_issues,
+            to_review=_format_review_target(chunk, reviewer.scope),
+            reasoning=reviewer.thinking,
+            effort=effort,
+            max_tokens=max_tokens,
             with_schema=True,
             review_protocol=prompts.review_protocol,
+            prompt_cache_key=cache_key,
         )
+        n = count_request(request)
         record(reviewer.model, n)
         print(f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer.name}[/cyan]: {n:,} input tokens")
 
@@ -1620,63 +1538,70 @@ def run_dry_run(
         for reviewer in prompts.scoped(ReviewerScope.SECTION).values():
             count_reviewer(chunk, reviewer)
 
-    # Paper-scoped reviewers read the whole source once, not once per section.
     paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
     for reviewer in prompts.scoped(ReviewerScope.PAPER).values():
         count_reviewer(paper_chunk, reviewer)
 
-    # The final referee runs on the same model as the strong reviewers.
     final_model = prompts.strong_model
-    n = _count_tokens(
-        client,
-        final_model,
-        prompts.final_referee,
-        global_context,
-        "[]",  # no issues available in dry run
-        f"# FULL PAPER\n```latex\n{tex}\n```",
+    final_request = _generation_request(
+        model=final_model,
+        system_prompt=prompts.final_referee,
+        global_context=global_context,
+        known_issues="[]",
+        to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
+        reasoning=True,
+        effort=effort,
+        max_tokens=max_tokens,
         with_schema=False,
+        prompt_cache_key=cache_key,
     )
+    n = count_request(final_request)
     record(final_model, n)
     print(f"  [blue]Final referee[/blue]: {n:,} input tokens")
 
-    total_input = sum(token_totals.values())
-    unpriced = sorted(model for model in token_totals if model not in MODEL_PRICING)
+    def pricing_for(model: ModelRef):
+        return provider_type(model.provider).pricing(model.model)
 
+    total_input = sum(token_totals.values())
+    unpriced = sorted(model for model in token_totals if pricing_for(model) is None)
     input_cost = sum(
-        count / 1e6 * MODEL_PRICING[model]["input"]
+        count / 1e6 * pricing.input
         for model, count in token_totals.items()
-        if model in MODEL_PRICING
+        if (pricing := pricing_for(model)) is not None
     )
-    # Two bounds rather than one: a single budget per call assumes nothing truncates,
-    # and a truncated call is retried, so the true ceiling is a budget per attempt. The
-    # gap between them is what truncation costs, which is the number worth seeing.
     max_output_cost = sum(
-        count * max_tokens / 1e6 * MODEL_PRICING[model]["output"]
+        count * max_tokens / 1e6 * pricing.output
         for model, count in call_counts.items()
-        if model in MODEL_PRICING
+        if (pricing := pricing_for(model)) is not None
     )
     max_output_cost_with_retries = max_output_cost * MAX_ATTEMPTS_PER_CALL
 
-    print("\n[bold]Input tokens by model (worst-case, no cache hits):[/bold]")
+    print("\n[bold]Input tokens by qualified model (no assumed cache hits):[/bold]")
     for model, count in token_totals.items():
-        pricing = MODEL_PRICING.get(model)
+        pricing = pricing_for(model)
         if pricing is None:
-            print(f"  {model}: {count:,} tokens [yellow](pricing unknown)[/yellow]")
+            print(f"  {model.qualified}: {count:,} tokens [yellow](pricing unknown)[/yellow]")
             continue
-        rate = pricing["input"]
-        cache_rate = pricing["cache_read"]
+        cache = ""
+        if pricing.cache_read is not None:
+            cache = (
+                f" (cached reads: ${pricing.cache_read}/M = "
+                f"${count / 1e6 * pricing.cache_read:.2f})"
+            )
+        if pricing.cache_write is not None:
+            cache += f" (cache writes: ${pricing.cache_write}/M)"
         print(
-            f"  {model}: {count:,} tokens @ ${rate}/M = ${count / 1e6 * rate:.2f} "
-            f"(cached reads: ${cache_rate}/M = ${count / 1e6 * cache_rate:.2f})"
+            f"  {model.qualified}: {count:,} tokens @ ${pricing.input}/M = "
+            f"${count / 1e6 * pricing.input:.2f}{cache}"
         )
     print(f"  Total input: {total_input:,} tokens")
 
     if unpriced:
         print(
-            "\n[yellow]No pricing on file for: "
-            + ", ".join(unpriced)
-            + ". The token counts above are complete, but the cost figures below exclude "
-            "these models. Current rates: https://platform.claude.com/docs/en/pricing[/yellow]"
+            "\n[yellow]Pricing unknown for: "
+            + ", ".join(model.qualified for model in unpriced)
+            + ". Token counts are complete, but the cost figures below exclude those "
+            "models. Check the relevant provider's current pricing page.[/yellow]"
         )
 
     label = "Estimated input cost (no cache)"
@@ -1688,15 +1613,14 @@ def run_dry_run(
         f"[bold green]Max output cost: ${max_output_cost:.2f}[/bold green]  "
         f"(a ceiling nobody reaches: it assumes all {sum(call_counts.values())} calls "
         f"emit the full {max_tokens:,} output tokens, and {no_thinking} of "
-        f"{len(prompts.reviewers)} reviewers have thinking disabled. --max-tokens is "
-        "deliberate headroom against truncation, not an expected spend: unused budget "
-        "is not billed, whereas a call cut off mid-JSON is billed in full for nothing)"
+        f"{len(prompts.reviewers)} reviewers have reasoning disabled. --max-tokens is "
+        "headroom against truncation, not expected spend)"
     )
     print(
-        f"[bold green]Max output cost if every call truncates and retries: "
+        f"[bold green]Max output cost if every retry-eligible call truncates: "
         f"${max_output_cost_with_retries:.2f}[/bold green]  "
-        f"(the true ceiling: a truncated call is retried once at lower effort, so one "
-        f"call bills up to {MAX_ATTEMPTS_PER_CALL} attempts)"
+        f"(the conservative application ceiling allows up to {MAX_ATTEMPTS_PER_CALL} "
+        "attempts per logical call)"
     )
     print(
         f"[bold green]Max total cost: ${input_cost + max_output_cost:.2f}[/bold green] "

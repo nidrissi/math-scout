@@ -24,10 +24,11 @@ CI runs the same checks on Python 3.11 and 3.12, except that it verifies formatt
 
 ## Tests
 
-Tests live in `tests/` and cover the pure, API-free parts of the pipeline: chunking,
-`\input` resolution, filename generation, global-context extraction, and issue handling.
-They never hit the network and need no credentials — please keep it that way. If you add
-something that needs a client, stub it out the way `FakeClient` does.
+Tests live in `tests/` and cover the pure, API-free parts of the pipeline plus native
+provider request translation: chunking, `\input` resolution, resume behavior, prompt
+composition, SDK request shapes, and issue handling. They never hit the network and need
+no credentials — please keep it that way. Orchestration tests use a provider-neutral
+fake; adapter tests use fake native clients and bind calls to installed SDK signatures.
 
 ## Changing prompts
 
