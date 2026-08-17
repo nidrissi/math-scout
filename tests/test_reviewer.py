@@ -6,16 +6,25 @@ transforms LaTeX text or reads files from a tmp_path fixture.
 
 from __future__ import annotations
 
-import inspect
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
-import anthropic
-import httpx
 import pytest
 
+from llm_reviewer.providers import (
+    GenerationRequest,
+    GenerationResult,
+    ModelRef,
+    Provider,
+    ProviderAuthenticationError,
+    ProviderConnectionError,
+    ProviderModelError,
+    ProviderRateLimitError,
+    ProviderRegistry,
+    ProviderServerError,
+    provider_type,
+)
 from llm_reviewer.reviewer import (
     DEFAULT_EFFORT,
     DEFAULT_MAX_TOKENS,
@@ -25,8 +34,6 @@ from llm_reviewer.reviewer import (
     FRONT_MATTER_NAME,
     MAX_ATTEMPTS_PER_CALL,
     MAX_OUTPUT_TOKENS,
-    MODEL_PRICING,
-    MODEL_SUPPORT,
     MOVING_SUFFIX,
     REVIEWER_SPECS,
     WHOLE_PAPER_NAME,
@@ -55,6 +62,7 @@ from llm_reviewer.reviewer import (
     run_dry_run,
     run_final_referee,
     run_pipeline,
+    run_settings,
     strip_comment,
     summarize_known_issues,
     validate_settings,
@@ -355,103 +363,70 @@ def test_format_coverage_note_names_every_failure():
 # ----------------------------------------------------------------------- access check
 
 
-class FakeParsed:
-    def __init__(self, parsed_output, stop_reason="end_turn"):
-        self.parsed_output = parsed_output
-        self.stop_reason = stop_reason
+class FakeProvider(Provider):
+    """Provider-neutral test double used by all orchestration tests."""
 
-
-class FakeStreamManager:
-    """`client.messages.stream(...)` returns a context manager, not a message."""
-
-    def __init__(self, result):
-        self._result = result
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return False
-
-    def get_final_message(self):
-        return self._result
-
-
-def _assert_sdk_accepts(method_name: str, kwargs: dict) -> None:
-    """Fail if the real SDK method would reject these arguments.
-
-    The stub below accepts anything, so without this the call-shape assertions would
-    keep passing after an SDK signature change. Binding against the real signature is
-    the closest we can get to a live call without credentials.
-    """
-    method = getattr(anthropic.resources.messages.Messages, method_name)
-    inspect.signature(method).bind(None, **kwargs)
-
-
-class FakeClient:
-    """Stands in for anthropic.Anthropic, recording what the pipeline sent."""
+    name = "anthropic"
+    display_name = "Anthropic"
+    credentials_help = "No usable Anthropic credentials. Export ANTHROPIC_API_KEY."
+    models_url = "https://example.test/models"
 
     def __init__(
         self,
         error: Exception | None = None,
-        stop_reason: str = "end_turn",
+        truncated: bool = False,
         issues_per_call: int = 0,
         truncate_first: int | None = None,
     ):
         self.error = error
-        self.stop_reason = stop_reason
+        self.truncated = truncated
         self.issues_per_call = issues_per_call
-        # Truncate this many calls and then succeed, so a retry has something to reach.
         self.truncate_first = truncate_first
         self.models_probed: list[str] = []
-        self.parse_calls: list[dict] = []
-        self.create_calls: list[dict] = []
-        self.messages = self
+        self.parse_calls: list[GenerationRequest] = []
+        self.create_calls: list[GenerationRequest] = []
+        self.count_calls: list[GenerationRequest] = []
 
-    def stream(self, **kwargs):
-        """Every generation call streams, so this is the only entry point the pipeline uses.
+    @classmethod
+    def validate_request(cls, model, *, reasoning, effort, output_limit):
+        return None
 
-        The structured and unstructured calls are told apart the way the SDK tells them
-        apart: by whether an `output_format` was asked for.
-        """
-        _assert_sdk_accepts("stream", kwargs)
-        result = self.parse(**kwargs) if "output_format" in kwargs else self.create(**kwargs)
-        return FakeStreamManager(result)
+    @classmethod
+    def pricing(cls, model):
+        return None
 
-    def create(self, **kwargs):
-        """The unstructured call, used only by the final referee."""
-        self.create_calls.append(kwargs)
+    def preflight(self, model: str) -> None:
+        self.models_probed.append(model)
         if self.error is not None:
             raise self.error
-        if self._truncates():
-            return SimpleNamespace(content=[], stop_reason="max_tokens")
-        return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text="# Summary\n\nreport")],
-            stop_reason=self.stop_reason,
-        )
 
-    def count_tokens(self, **kwargs):
-        _assert_sdk_accepts("count_tokens", kwargs)
-        self.models_probed.append(kwargs["model"])
+    def count_tokens(self, request: GenerationRequest) -> int:
+        self.count_calls.append(request)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(input_tokens=100)
+        return 100
 
     def _truncates(self) -> bool:
         """Whether this call runs out of budget, honouring `truncate_first` if set."""
         if self.truncate_first is not None:
             return len(self.parse_calls) + len(self.create_calls) <= self.truncate_first
-        return self.stop_reason == "max_tokens"
+        return self.truncated
 
-    def parse(self, **kwargs):
-        self.parse_calls.append(kwargs)
+    def generate(self, request: GenerationRequest) -> GenerationResult:
+        calls = self.parse_calls if request.output_schema is not None else self.create_calls
+        calls.append(request)
         if self.error is not None:
             raise self.error
         if self._truncates():
-            return FakeParsed(None, stop_reason="max_tokens")
-        target = kwargs["messages"][0]["content"][1]["text"]
-        # Paper-scoped reviewers are handed the whole source, which carries no section
-        # title; their findings are attributed to the document instead.
+            return GenerationResult(completed=False, truncated=True)
+        if request.output_schema is None:
+            return GenerationResult(text="# Summary\n\nreport")
+        target = next(
+            block.text
+            for block in request.blocks
+            if block.role == "user"
+            and block.text.startswith(("# SECTION UNDER REVIEW", "# FULL PAPER UNDER REVIEW"))
+        )
         location = (
             target.split("SECTION TITLE: ")[1].split("\n")[0]
             if "SECTION TITLE: " in target
@@ -470,45 +445,72 @@ class FakeClient:
             )
             for n in range(self.issues_per_call)
         ]
-        return FakeParsed(Review(issues=issues))
+        return GenerationResult(parsed=Review(issues=issues))
 
 
-def api_error(cls: type, status: int, message: str = "nope"):
-    response = httpx.Response(status, request=httpx.Request("POST", "https://example"))
-    return cls(message, response=response, body=None)
+class FakeOpenAIProvider(FakeProvider):
+    name = "openai"
+    display_name = "OpenAI"
+    credentials_help = "No usable OpenAI credentials. Export OPENAI_API_KEY."
+
+
+def registry(*providers: Provider) -> ProviderRegistry:
+    return ProviderRegistry({provider.name: provider for provider in providers})
 
 
 def test_check_access_probes_each_distinct_model_once():
-    client = FakeClient()
-    check_access(client, ["strong", "fast", "strong", "fast"])
-    assert client.models_probed == ["fast", "strong"]
+    provider = FakeProvider()
+    check_access(
+        registry(provider),
+        [ModelRef.parse(name) for name in ("strong", "fast", "strong", "fast")],
+    )
+    assert provider.models_probed == ["fast", "strong"]
+
+
+def test_check_access_routes_distinct_models_to_each_provider_without_generation():
+    anthropic_provider = FakeProvider()
+    openai_provider = FakeOpenAIProvider()
+    providers = registry(anthropic_provider, openai_provider)
+
+    check_access(
+        providers,
+        [ModelRef.parse("claude-opus-5"), ModelRef.parse("openai:gpt-5.6-sol")],
+    )
+
+    assert anthropic_provider.models_probed == ["claude-opus-5"]
+    assert openai_provider.models_probed == ["gpt-5.6-sol"]
+    assert anthropic_provider.parse_calls == openai_provider.parse_calls == []
 
 
 def test_check_access_reports_missing_credentials():
     # The SDK raises a bare TypeError when no credential can be resolved at all.
-    client = FakeClient(TypeError("Could not resolve authentication method."))
+    client = FakeProvider(ProviderAuthenticationError("Could not resolve authentication method."))
     with pytest.raises(ConfigurationError, match="ANTHROPIC_API_KEY"):
-        check_access(client, ["strong"])
+        check_access(registry(client), [ModelRef.parse("strong")])
 
 
 def test_check_access_reports_rejected_credentials():
-    client = FakeClient(api_error(anthropic.AuthenticationError, 401, "invalid x-api-key"))
+    client = FakeProvider(ProviderAuthenticationError("invalid x-api-key"))
     with pytest.raises(ConfigurationError, match="rejected"):
-        check_access(client, ["strong"])
+        check_access(registry(client), [ModelRef.parse("strong")])
+
+
+def test_check_access_reports_openai_credentials_help():
+    provider = FakeOpenAIProvider(ProviderAuthenticationError("bad key"))
+    with pytest.raises(ConfigurationError, match="OPENAI_API_KEY"):
+        check_access(registry(provider), [ModelRef.parse("openai:gpt-5.6-sol")])
 
 
 def test_check_access_reports_an_unknown_model():
-    client = FakeClient(api_error(anthropic.NotFoundError, 404, "model not found"))
-    with pytest.raises(ConfigurationError, match="'made-up-model' is not available"):
-        check_access(client, ["made-up-model"])
+    client = FakeProvider(ProviderModelError("model not found"))
+    with pytest.raises(ConfigurationError, match="anthropic:made-up-model.*not available"):
+        check_access(registry(client), [ModelRef.parse("made-up-model")])
 
 
 def test_check_access_reports_an_unreachable_api():
-    client = FakeClient(
-        anthropic.APIConnectionError(request=httpx.Request("POST", "https://example"))
-    )
+    client = FakeProvider(ProviderConnectionError("offline"))
     with pytest.raises(ConfigurationError, match="Cannot reach"):
-        check_access(client, ["strong"])
+        check_access(registry(client), [ModelRef.parse("strong")])
 
 
 # ---------------------------------------------------------------------------- prompts
@@ -530,12 +532,21 @@ def test_load_prompts_reads_every_prompt_including_the_final_referee():
 
 def test_load_prompts_applies_the_requested_models():
     prompts = load_prompts(strong_model="strong-x", fast_model="fast-y")
-    assert prompts.reviewers["FormalVerifier"].model == "strong-x"
-    assert prompts.reviewers["AdversarialSkeptic"].model == "strong-x"
-    assert prompts.reviewers["ClaimAuditor"].model == "strong-x"
-    assert prompts.reviewers["NotationAuditor"].model == "fast-y"
-    assert prompts.reviewers["ExpositionReferee"].model == "fast-y"
-    assert prompts.strong_model == "strong-x"
+    assert prompts.reviewers["FormalVerifier"].model == ModelRef.parse("strong-x")
+    assert prompts.reviewers["AdversarialSkeptic"].model == ModelRef.parse("strong-x")
+    assert prompts.reviewers["ClaimAuditor"].model == ModelRef.parse("strong-x")
+    assert prompts.reviewers["NotationAuditor"].model == ModelRef.parse("fast-y")
+    assert prompts.reviewers["ExpositionReferee"].model == ModelRef.parse("fast-y")
+    assert prompts.strong_model == ModelRef.parse("strong-x")
+
+
+def test_load_prompts_accepts_mixed_provider_models():
+    prompts = load_prompts(
+        strong_model="openai:gpt-5.6-sol", fast_model="anthropic:claude-sonnet-5"
+    )
+    assert prompts.reviewers["FormalVerifier"].model == ModelRef("openai", "gpt-5.6-sol")
+    assert prompts.reviewers["ExpositionReferee"].model == ModelRef("anthropic", "claude-sonnet-5")
+    assert prompts.strong_model == ModelRef("openai", "gpt-5.6-sol")
 
 
 def test_the_issue_block_is_named_once_and_matches_what_the_pipeline_sends():
@@ -548,7 +559,7 @@ def test_the_issue_block_is_named_once_and_matches_what_the_pipeline_sends():
     reviewer_texts = [r.prompt_text for r in prompts.reviewers.values()]
     all_texts = [*reviewer_texts, prompts.review_protocol, prompts.final_referee]
 
-    heading = _build_messages("issues", "target")[0]["content"][0]["text"].split("\n")[0]
+    heading = _build_messages("issues", "target")[0].text.split("\n")[0]
     assert heading == "# DETECTED ISSUES"
     assert "DETECTED ISSUES" in prompts.review_protocol
     assert not any("DETECTED ISSUES" in text for text in reviewer_texts)
@@ -557,20 +568,20 @@ def test_the_issue_block_is_named_once_and_matches_what_the_pipeline_sends():
 
 def test_the_review_protocol_is_its_own_cached_system_block():
     blocks = _build_system("ctx", "lane", "protocol")
-    assert [b["text"] for b in blocks] == [
+    assert [b.text for b in blocks] == [
         "# GLOBAL CONTEXT\nctx",
         "# REVIEW PROTOCOL\nprotocol",
         "# REVIEWER PROMPT\nlane",
     ]
     # Every block is a cache breakpoint, and the first two are identical across
     # reviewers, so reviewers on one model share a prefix instead of writing their own.
-    assert all(b["cache_control"] == {"type": "ephemeral"} for b in blocks)
+    assert all(b.cacheable for b in blocks)
 
 
 def test_the_final_referee_gets_no_review_protocol():
     """It writes markdown; the protocol describes the JSON issue schema."""
     blocks = _build_system("ctx", "referee")
-    assert [b["text"] for b in blocks] == ["# GLOBAL CONTEXT\nctx", "# REVIEWER PROMPT\nreferee"]
+    assert [b.text for b in blocks] == ["# GLOBAL CONTEXT\nctx", "# REVIEWER PROMPT\nreferee"]
 
 
 def test_every_reviewer_call_in_a_run_carries_the_protocol(tmp_path):
@@ -580,9 +591,10 @@ def test_every_reviewer_call_in_a_run_carries_the_protocol(tmp_path):
     protocol = load_prompts().review_protocol
 
     for call in client.parse_calls:
-        headings = [b["text"].split("\n")[0] for b in call["system"]]
+        system = [block for block in call.blocks if block.role == "system"]
+        headings = [block.text.split("\n")[0] for block in system]
         assert headings == ["# GLOBAL CONTEXT", "# REVIEW PROTOCOL", "# REVIEWER PROMPT"]
-        assert call["system"][1]["text"] == "# REVIEW PROTOCOL\n" + protocol
+        assert system[1].text == "# REVIEW PROTOCOL\n" + protocol
 
 
 # ----------------------------------------------------------------------------- scope
@@ -602,17 +614,21 @@ def test_cross_section_reviewers_read_the_whole_paper():
 
 
 def test_paper_scoped_reviewers_are_not_told_they_are_reading_a_section():
-    client = FakeClient()
+    client = FakeProvider()
     prompts = load_prompts()
     call_reviewer(
-        client=client,
+        providers=registry(client),
         reviewer=prompts.reviewers["NotationAuditor"],
         chunk=Chunk(WHOLE_PAPER_NAME, "whole source"),
         global_context="ctx",
         known_issues="none",
     )
     (sent,) = client.parse_calls
-    target = sent["messages"][0]["content"][1]["text"]
+    target = next(
+        block.text
+        for block in sent.blocks
+        if block.role == "user" and block.text.startswith("# FULL PAPER UNDER REVIEW")
+    )
     assert target.startswith("# FULL PAPER UNDER REVIEW")
     assert "SECTION TITLE" not in target
 
@@ -622,8 +638,9 @@ def test_paper_scoped_reviewers_are_not_told_they_are_reading_a_section():
 
 def test_default_models_are_priced():
     """Cost estimation silently degrades if a default model has no pricing entry."""
-    assert DEFAULT_MODEL_STRONG in MODEL_PRICING
-    assert DEFAULT_MODEL_FAST in MODEL_PRICING
+    for value in (DEFAULT_MODEL_STRONG, DEFAULT_MODEL_FAST):
+        model = ModelRef.parse(value)
+        assert provider_type(model.provider).pricing(model.model) is not None
 
 
 def test_default_max_tokens_stays_under_the_non_streaming_ceiling():
@@ -657,10 +674,10 @@ def test_only_the_single_pass_reviewer_runs_without_thinking():
     [("FormalVerifier", "adaptive"), ("ExpositionReferee", "disabled")],
 )
 def test_call_reviewer_sends_the_reviewer_s_thinking_config(reviewer_name, expected):
-    client = FakeClient()
+    client = FakeProvider()
     prompts = load_prompts()
     call_reviewer(
-        client=client,
+        providers=registry(client),
         reviewer=prompts.reviewers[reviewer_name],
         chunk=Chunk("Intro", "body"),
         global_context="ctx",
@@ -669,17 +686,17 @@ def test_call_reviewer_sends_the_reviewer_s_thinking_config(reviewer_name, expec
         effort="medium",
     )
     (sent,) = client.parse_calls
-    assert sent["thinking"] == {"type": expected}
-    assert sent["output_config"] == {"effort": "medium"}
-    assert sent["max_tokens"] == 1234
+    assert sent.reasoning is (expected == "adaptive")
+    assert sent.effort == "medium"
+    assert sent.output_limit == 1234
 
 
 def test_call_reviewer_names_truncation_as_the_cause():
-    client = FakeClient(stop_reason="max_tokens")
+    client = FakeProvider(truncated=True)
     prompts = load_prompts()
     with pytest.raises(ValueError, match="Raise --max-tokens"):
         call_reviewer(
-            client=client,
+            providers=registry(client),
             reviewer=prompts.reviewers["FormalVerifier"],
             chunk=Chunk("Intro", "body"),
             global_context="ctx",
@@ -690,10 +707,10 @@ def test_call_reviewer_names_truncation_as_the_cause():
 def test_call_reviewer_retries_a_truncated_call_one_effort_level_down():
     """A truncated call is billed in full and returns nothing, so the retry is free of
     any trade-off but depth: without it the section loses that reviewer entirely."""
-    client = FakeClient(truncate_first=1, issues_per_call=1)
+    client = FakeProvider(truncate_first=1, issues_per_call=1)
     prompts = load_prompts()
     review = call_reviewer(
-        client=client,
+        providers=registry(client),
         reviewer=prompts.reviewers["FormalVerifier"],
         chunk=Chunk("Intro", "body"),
         global_context="ctx",
@@ -701,18 +718,46 @@ def test_call_reviewer_retries_a_truncated_call_one_effort_level_down():
         effort="high",
     )
     assert len(review.issues) == 1
-    efforts = [call["output_config"]["effort"] for call in client.parse_calls]
+    efforts = [call.effort for call in client.parse_calls]
     assert efforts == ["high", "medium"]
+
+
+def test_call_reviewer_retries_a_normalized_transient_error(monkeypatch):
+    class FlakyProvider(FakeProvider):
+        def __init__(self):
+            super().__init__(issues_per_call=1)
+            self.attempts = 0
+
+        def generate(self, request):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ProviderRateLimitError("slow down")
+            return super().generate(request)
+
+    monkeypatch.setattr("llm_reviewer.reviewer.time.sleep", lambda delay: None)
+    provider = FlakyProvider()
+    prompts = load_prompts()
+
+    result = call_reviewer(
+        providers=registry(provider),
+        reviewer=prompts.reviewers["FormalVerifier"],
+        chunk=Chunk("Intro", "body"),
+        global_context="ctx",
+        known_issues="none",
+    )
+
+    assert len(result.issues) == 1
+    assert provider.attempts == 2
 
 
 def test_a_truncated_call_bills_at_most_max_attempts():
     """`run_dry_run` prices its ceiling off MAX_ATTEMPTS_PER_CALL, so if the retry
     structure ever grows another attempt, that ceiling silently stops being one."""
-    client = FakeClient(stop_reason="max_tokens")
+    client = FakeProvider(truncated=True)
     prompts = load_prompts()
     with pytest.raises(ValueError):
         call_reviewer(
-            client=client,
+            providers=registry(client),
             reviewer=prompts.reviewers["FormalVerifier"],
             chunk=Chunk("Intro", "body"),
             global_context="ctx",
@@ -721,15 +766,15 @@ def test_a_truncated_call_bills_at_most_max_attempts():
         )
     assert len(client.parse_calls) == MAX_ATTEMPTS_PER_CALL
 
-    referee = FakeClient(stop_reason="max_tokens")
+    referee = FakeProvider(truncated=True)
     with pytest.raises(ValueError):
         run_final_referee(
-            client=referee,
+            providers=registry(referee),
             tex="paper",
             issues=[],
             global_context="ctx",
             system_prompt="be a referee",
-            model="strong",
+            model=ModelRef.parse("strong"),
             effort="high",
         )
     assert len(referee.create_calls) == MAX_ATTEMPTS_PER_CALL
@@ -737,11 +782,11 @@ def test_a_truncated_call_bills_at_most_max_attempts():
 
 def test_call_reviewer_does_not_retry_below_the_lowest_effort():
     """`low` has nothing under it, so a truncation there is final rather than a loop."""
-    client = FakeClient(stop_reason="max_tokens")
+    client = FakeProvider(truncated=True)
     prompts = load_prompts()
     with pytest.raises(ValueError, match="Raise --max-tokens"):
         call_reviewer(
-            client=client,
+            providers=registry(client),
             reviewer=prompts.reviewers["FormalVerifier"],
             chunk=Chunk("Intro", "body"),
             global_context="ctx",
@@ -753,18 +798,18 @@ def test_call_reviewer_does_not_retry_below_the_lowest_effort():
 
 def test_final_referee_retries_a_truncated_synthesis():
     """This call reads the whole paper and every issue, and losing it loses the report."""
-    client = FakeClient(truncate_first=1)
+    client = FakeProvider(truncate_first=1)
     report = run_final_referee(
-        client=client,
+        providers=registry(client),
         tex="paper",
         issues=[],
         global_context="ctx",
         system_prompt="be a referee",
-        model="strong",
+        model=ModelRef.parse("strong"),
         effort="high",
     )
     assert report.startswith("# Summary")
-    efforts = [call["output_config"]["effort"] for call in client.create_calls]
+    efforts = [call.effort for call in client.create_calls]
     assert efforts == ["high", "medium"]
 
 
@@ -833,32 +878,44 @@ def test_validate_settings_ignores_models_it_has_no_table_entry_for():
     validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="max")
 
 
-def test_every_priced_model_can_actually_be_driven():
-    """A model advertised in --dry-run pricing must accept the request shape we send."""
-    for model in MODEL_PRICING:
-        support = MODEL_SUPPORT.get(model)
-        assert support is not None and support.efforts, model
+def test_state_settings_keep_anthropic_bare_and_qualify_openai():
+    old_style = run_settings(load_prompts(), DEFAULT_MAX_TOKENS, "high")
+    assert set(old_style["models"].values()) == {
+        "claude-opus-5",
+        "claude-sonnet-5",
+    }
+
+    mixed = run_settings(
+        load_prompts(strong_model="openai:gpt-5.6-sol"), DEFAULT_MAX_TOKENS, "high"
+    )
+    assert mixed["models"]["FormalVerifier"] == "openai:gpt-5.6-sol"
+    assert mixed["models"]["ExpositionReferee"] == "claude-sonnet-5"
+
+
+def test_validate_settings_rejects_unknown_provider():
+    prompts = load_prompts(strong_model="other:model")
+    with pytest.raises(ConfigurationError, match="Unknown model provider 'other'"):
+        validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="high")
+
+
+def test_default_priced_models_can_actually_be_driven():
+    """The default priced models accept the request shape the pipeline sends."""
+    validate_settings(load_prompts(), max_tokens=DEFAULT_MAX_TOKENS, effort="high")
 
 
 # ---------------------------------------------------------------- pre-flight hardening
 
 
 def test_check_access_reports_a_rate_limit_instead_of_raising_it():
-    client = FakeClient(api_error(anthropic.RateLimitError, 429, "slow down"))
+    client = FakeProvider(ProviderRateLimitError("slow down"))
     with pytest.raises(ConfigurationError, match="Rate limited"):
-        check_access(client, ["strong"])
+        check_access(registry(client), [ModelRef.parse("strong")])
 
 
 def test_check_access_reports_a_server_error_instead_of_raising_it():
-    client = FakeClient(api_error(anthropic.InternalServerError, 500, "boom"))
+    client = FakeProvider(ProviderServerError("boom", status_code=500))
     with pytest.raises(ConfigurationError, match="returned 500"):
-        check_access(client, ["strong"])
-
-
-def test_fake_client_would_catch_an_sdk_signature_change():
-    """The stub accepts anything, so prove the signature guard is actually live."""
-    with pytest.raises(TypeError):
-        FakeClient().count_tokens(model="m", messages=[], not_a_real_parameter=1)
+        check_access(registry(client), [ModelRef.parse("strong")])
 
 
 # ------------------------------------------------------------------------- masking
@@ -969,9 +1026,9 @@ def review(tmp_path, tex: str, **kwargs):
     """Run the pipeline over *tex* into a fixed output dir, returning (client, result)."""
     source = tmp_path / "paper.tex"
     source.write_text(tex, encoding="utf-8")
-    client = FakeClient(issues_per_call=1)
+    client = FakeProvider(issues_per_call=1)
     result = run_pipeline(
-        client,
+        registry(client),
         str(source),
         tmp_path / "out",
         prompts=load_prompts(**kwargs.pop("models", {})),
@@ -988,6 +1045,67 @@ THREE = (("Alpha", "aaa"), ("Beta", "bbb"), ("Gamma", "ggg"))
 SECTION_CALLS = 3
 PAPER_CALLS = 2
 THREE_CALLS = 3 * SECTION_CALLS + PAPER_CALLS
+
+
+def test_mixed_providers_route_reviewers_and_final_referee_by_tier(tmp_path):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    anthropic_provider = FakeProvider(issues_per_call=1)
+    openai_provider = FakeOpenAIProvider(issues_per_call=1)
+    prompts = load_prompts(strong_model="openai:gpt-5.6-sol", fast_model="claude-sonnet-5")
+
+    result = run_pipeline(
+        registry(anthropic_provider, openai_provider),
+        str(source),
+        tmp_path / "out",
+        prompts=prompts,
+        assume_yes=True,
+    )
+
+    # Strong: two section reviewers + ClaimAuditor + final referee.
+    assert len(openai_provider.parse_calls) == 3
+    assert len(openai_provider.create_calls) == 1
+    # Fast: ExpositionReferee + NotationAuditor.
+    assert len(anthropic_provider.parse_calls) == 2
+    assert anthropic_provider.create_calls == []
+    assert len(result.issues) == 5
+
+
+def test_openai_only_run_routes_every_generation_to_one_provider(tmp_path):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    openai_provider = FakeOpenAIProvider(issues_per_call=1)
+    prompts = load_prompts(strong_model="openai:gpt-5.6-sol", fast_model="openai:gpt-5.6-sol")
+
+    result = run_pipeline(
+        registry(openai_provider),
+        str(source),
+        tmp_path / "out",
+        prompts=prompts,
+        assume_yes=True,
+    )
+
+    assert len(openai_provider.parse_calls) == 5
+    assert len(openai_provider.create_calls) == 1
+    assert len(result.issues) == 5
+
+
+def test_fatal_provider_error_stops_the_pipeline_after_one_call(tmp_path):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    provider = FakeProvider(ProviderAuthenticationError("revoked"))
+
+    result = run_pipeline(
+        registry(provider),
+        str(source),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+    )
+
+    assert result.fatal_error is not None
+    assert len(provider.parse_calls) == 1
+    assert result.report_path is None
 
 
 def test_resume_makes_no_calls_and_no_duplicates_when_nothing_changed(tmp_path):
@@ -1065,7 +1183,15 @@ def test_renaming_a_reused_review_does_not_re_run_it(tmp_path):
     client, result = review(tmp_path, sections(*THREE, front="Intro prose. " * 60))
 
     # Match the section heading, not the text: the whole-paper pass sees "Alpha" too.
-    targets = [c["messages"][0]["content"][1]["text"] for c in client.parse_calls]
+    targets = [
+        next(
+            block.text
+            for block in call.blocks
+            if block.role == "user"
+            and block.text.startswith(("# SECTION UNDER REVIEW", "# FULL PAPER UNDER REVIEW"))
+        )
+        for call in client.parse_calls
+    ]
     assert not any("SECTION TITLE: Alpha" in t for t in targets)
     assert (tmp_path / "out" / "reviews" / "001_Alpha_FormalVerifier.json").is_file()
     assert len(result.issues) == 4 * SECTION_CALLS + PAPER_CALLS
@@ -1092,7 +1218,15 @@ def test_two_sections_sharing_a_name_can_swap_without_clobbering_each_other(tmp_
     out = tmp_path / "out"
 
     # Both swapped reviews were reused, so both had to be renamed past each other.
-    targets = [c["messages"][0]["content"][1]["text"] for c in client.parse_calls]
+    targets = [
+        next(
+            block.text
+            for block in call.blocks
+            if block.role == "user"
+            and block.text.startswith(("# SECTION UNDER REVIEW", "# FULL PAPER UNDER REVIEW"))
+        )
+        for call in client.parse_calls
+    ]
     assert not any("SECTION TITLE: Lemmas" in t for t in targets)
     assert stems_in(out / "chunks") == [
         "000_Lemmas.tex",
@@ -1126,7 +1260,10 @@ def test_declining_the_run_deletes_nothing(tmp_path, monkeypatch):
     source = tmp_path / "paper.tex"
     source.write_text(sections(*THREE[:1]), encoding="utf-8")
     result = run_pipeline(
-        FakeClient(issues_per_call=1), str(source), tmp_path / "out", prompts=load_prompts()
+        registry(FakeProvider(issues_per_call=1)),
+        str(source),
+        tmp_path / "out",
+        prompts=load_prompts(),
     )
 
     assert result.aborted is True
@@ -1138,7 +1275,15 @@ def test_resume_re_reviews_a_chunk_whose_text_changed(tmp_path):
     client, result = review(tmp_path, sections(("Alpha", "REWRITTEN"), *THREE[1:]))
 
     assert len(client.parse_calls) == SECTION_CALLS + PAPER_CALLS
-    reviewed = [c["messages"][0]["content"][1]["text"] for c in client.parse_calls]
+    reviewed = [
+        next(
+            block.text
+            for block in call.blocks
+            if block.role == "user"
+            and block.text.startswith(("# SECTION UNDER REVIEW", "# FULL PAPER UNDER REVIEW"))
+        )
+        for call in client.parse_calls
+    ]
     assert all("REWRITTEN" in text for text in reviewed)
     assert len(result.issues) == THREE_CALLS
 
@@ -1155,7 +1300,7 @@ def test_resume_refuses_when_a_reviewer_prompt_changed(tmp_path):
 
     with pytest.raises(ConfigurationError, match="the reviewer prompts have changed"):
         run_pipeline(
-            FakeClient(issues_per_call=1),
+            registry(FakeProvider(issues_per_call=1)),
             str(tmp_path / "paper.tex"),
             tmp_path / "out",
             prompts=edited,
@@ -1167,6 +1312,20 @@ def test_resume_refuses_when_the_models_changed(tmp_path):
     review(tmp_path, sections(*THREE))
     with pytest.raises(ConfigurationError, match="different settings"):
         review(tmp_path, sections(*THREE), models={"strong_model": "claude-opus-4-7"})
+
+
+def test_resume_refuses_when_the_provider_changes(tmp_path):
+    review(tmp_path, sections(*THREE))
+    source = tmp_path / "paper.tex"
+    prompts = load_prompts(strong_model="openai:gpt-5.6-sol")
+    with pytest.raises(ConfigurationError, match="different settings"):
+        run_pipeline(
+            registry(FakeProvider(), FakeOpenAIProvider()),
+            str(source),
+            tmp_path / "out",
+            prompts=prompts,
+            assume_yes=True,
+        )
 
 
 def test_resume_refuses_when_effort_changed(tmp_path):
@@ -1200,18 +1359,18 @@ def test_resume_re_runs_a_reviewer_whose_stored_review_is_corrupt(tmp_path):
 def test_the_coverage_note_is_not_filed_under_detected_issues(tmp_path):
     """It reports failed reviewer calls; nested in the issue list it reads as a finding."""
     report = run_final_referee(
-        client := FakeClient(),
+        providers=registry(client := FakeProvider()),
         tex="\\section{One}\nx\n",
         issues=[issue("major")],
         global_context="ctx",
         system_prompt="referee",
-        model="strong",
+        model=ModelRef.parse("strong"),
         coverage_note=format_coverage_note([Failure("Intro", "FormalVerifier", "boom")]),
     )
     assert report.startswith("# Summary")
 
     (sent,) = client.create_calls
-    blocks = [b["text"] for b in sent["messages"][0]["content"]]
+    blocks = [block.text for block in sent.blocks if block.role == "user"]
     assert "COVERAGE GAPS" in blocks[0]
     assert blocks[1].startswith("# DETECTED ISSUES")
     assert "COVERAGE GAPS" not in blocks[1]
@@ -1221,16 +1380,31 @@ def test_the_coverage_note_is_not_filed_under_detected_issues(tmp_path):
 def test_dry_run_counts_the_paper_reviewers_once_not_once_per_section(tmp_path, capsys):
     source = tmp_path / "paper.tex"
     source.write_text(sections(*THREE), encoding="utf-8")
-    client = FakeClient()
+    client = FakeProvider()
 
-    run_dry_run(client, str(source), prompts=load_prompts())
+    run_dry_run(registry(client), str(source), prompts=load_prompts())
 
     out = capsys.readouterr().out
     for name in ("NotationAuditor", "ClaimAuditor"):
         assert out.count(name) == 1
     assert out.count("FormalVerifier") == 3
     # Three sections x three section reviewers, two paper passes, one final referee.
-    assert len(client.models_probed) == THREE_CALLS + 1
+    assert len(client.count_calls) == THREE_CALLS + 1
+
+
+def test_dry_run_groups_counts_by_qualified_model_and_marks_unknown_pricing(tmp_path, capsys):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    anthropic_provider = FakeProvider()
+    openai_provider = FakeOpenAIProvider()
+    prompts = load_prompts(strong_model="openai:gpt-5.6-sol", fast_model="anthropic:future-fast")
+
+    run_dry_run(registry(anthropic_provider, openai_provider), str(source), prompts=prompts)
+
+    out = capsys.readouterr().out
+    assert "openai:gpt-5.6-sol" in out
+    assert "anthropic:future-fast" in out
+    assert "pricing unknown" in out
 
 
 def test_reviews_without_a_state_file_are_refused_rather_than_ignored(tmp_path):
@@ -1244,7 +1418,11 @@ def test_a_typo_in_the_input_path_creates_no_output_directory(tmp_path):
     out = tmp_path / "out"
     with pytest.raises(ConfigurationError):
         run_pipeline(
-            FakeClient(), str(tmp_path / "nope.tex"), out, prompts=load_prompts(), assume_yes=True
+            registry(FakeProvider()),
+            str(tmp_path / "nope.tex"),
+            out,
+            prompts=load_prompts(),
+            assume_yes=True,
         )
     assert not out.exists()
 
@@ -1254,9 +1432,9 @@ def test_declining_the_confirmation_stops_before_any_call(tmp_path, monkeypatch)
     monkeypatch.setattr("builtins.input", lambda: "n")
     source = tmp_path / "paper.tex"
     source.write_text(sections(*THREE), encoding="utf-8")
-    client = FakeClient(issues_per_call=1)
+    client = FakeProvider(issues_per_call=1)
 
-    result = run_pipeline(client, str(source), tmp_path / "out", prompts=load_prompts())
+    result = run_pipeline(registry(client), str(source), tmp_path / "out", prompts=load_prompts())
 
     assert result.aborted is True
     assert client.parse_calls == []

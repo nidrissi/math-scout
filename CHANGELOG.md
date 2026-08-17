@@ -7,6 +7,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Native OpenAI Responses API support alongside Anthropic. Model flags now accept
+  `[provider:]model`, so strong and fast tiers can use different providers while the
+  final referee continues to follow the strong tier.
+- Provider-neutral generation, token-counting, capability, pricing, retry, and error
+  contracts, with credential-free adapter tests bound to both installed SDK signatures.
+
+### Changed
+
+- Dry runs group exact token counts by provider-qualified model and keep working when
+  pricing metadata is unavailable. Anthropic resume settings retain their historical
+  bare model IDs; non-Anthropic selections are stored qualified.
+- Prompt caching is translated natively: Anthropic cache controls are preserved, while
+  OpenAI GPT-5.6 requests use developer `input_text` breakpoints and a deterministic
+  paper-specific cache key.
+
 ## [0.1.0a2] — 2026-08-16
 
 **This invalidates existing output directories**, on two counts: the `--max-tokens`

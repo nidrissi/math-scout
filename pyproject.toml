@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Najib Idrissi-Kaïtouni" }]
-keywords = ["latex", "mathematics", "peer-review", "claude", "llm"]
+keywords = ["latex", "mathematics", "peer-review", "llm", "anthropic", "openai"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -17,10 +17,14 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Mathematics",
     "Topic :: Text Processing :: Markup :: LaTeX",
 ]
-# The anthropic floor is the version whose request shape this was built and tested
-# against (thinking, output_config, messages.parse). The upper bound is deliberate:
-# the code depends on exact keyword names in a fast-moving SDK.
-dependencies = ["anthropic>=0.120,<1", "pydantic>=2.13,<3", "rich>=15,<17"]
+# The SDK floors are the versions whose streaming and structured-output request shapes
+# this code binds against. Upper bounds are deliberate: both native APIs move quickly.
+dependencies = [
+    "anthropic>=0.120,<1",
+    "openai>=3.1,<4",
+    "pydantic>=2.13,<3",
+    "rich>=15,<17",
+]
 
 [project.urls]
 Homepage = "https://github.com/nidrissi/llm-reviewer"

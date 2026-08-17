@@ -3,9 +3,9 @@
 [![CI](https://github.com/nidrissi/llm-reviewer/actions/workflows/ci.yml/badge.svg)](https://github.com/nidrissi/llm-reviewer/actions/workflows/ci.yml)
 
 A multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a
-`.tex` file into sections, runs a set of specialised Claude-based reviewers over them —
-some section by section, some over the whole paper — and synthesises a final referee
-report in markdown.
+`.tex` file into sections, runs a set of specialised LLM-based reviewers over them — some
+section by section, some over the whole paper — and synthesises a final referee report in
+markdown. Anthropic and OpenAI models can be used separately or together.
 
 > **Alpha software.** It works and it is useful, but interfaces, prompts, and output
 > formats will change without notice, and there is no backwards-compatibility promise
@@ -62,7 +62,7 @@ finding across the whole paper, and runs only once per review.
 ## Requirements
 
 - Python 3.11 or newer
-- An Anthropic API key with credit on it
+- Credentials with credit for each provider you select (Anthropic and/or OpenAI)
 
 ## Install
 
@@ -83,7 +83,11 @@ uv run llm-reviewer paper.tex --dry-run
 
 ## Credentials
 
-Either export a key:
+Only providers selected by `--strong-model` and `--fast-model` are initialized or
+contacted. Bare model IDs use Anthropic, so the default command still needs only
+Anthropic credentials.
+
+For Anthropic, either export a key:
 
 ```bash
 export ANTHROPIC_API_KEY=...
@@ -98,6 +102,16 @@ ant auth login
 
 Don't pass the key inline on the command line — it ends up in your shell history.
 
+For OpenAI, export an API key:
+
+```bash
+export OPENAI_API_KEY=...
+```
+
+The preflight checks each distinct selected model with its provider's free input-token
+count endpoint before creating output or asking you to approve a paid run. Credential,
+permission, and missing-model failures name the provider that rejected the check.
+
 ## Cost
 
 **Start with `--dry-run`.** A full review makes one API call per section per
@@ -109,10 +123,12 @@ paper, so on a long paper it adds up to real money.
 llm-reviewer paper.tex --dry-run
 ```
 
-This counts input tokens and prints a cost estimate without sending a single generation
-request. The input figure is a rough lower bound: it excludes the accumulated "known
-issues" context that grows during a run, and it does not model prompt-cache savings, which
-cut repeat input cost substantially.
+This asks each selected provider for the exact input-token count of every dry-run request
+and prints a cost estimate without sending a generation request. The individual counts
+are exact; the run total is still a lower bound because it excludes the accumulated
+"known issues" context that only exists after reviewers start producing findings. Cost
+estimates are optional metadata: a model with no trustworthy price on file still works
+and is shown as `pricing unknown`.
 
 The output figures are the opposite — ceilings nobody reaches, since they assume every
 call emits its full `--max-tokens`. Two are printed: one assuming no call truncates, and
@@ -122,12 +138,11 @@ Before a real run starts, the tool prints the chunks it extracted and asks you t
 
 ## Privacy
 
-Running this **sends the full text of your paper to the Anthropic API**. If the paper is
-unpublished, under embargo, covered by a collaboration agreement, or contains anything you
-are not free to disclose to a third party, that matters — decide deliberately. See
-Anthropic's [privacy policy](https://www.anthropic.com/legal/privacy) and
-[data usage terms](https://privacy.claude.com/en/articles/10023548-how-do-you-use-my-data)
-for how the data is handled.
+Running this **sends the full text of your paper to every API provider selected by your
+model flags**. In a mixed run, both Anthropic and OpenAI receive paper content. If the
+paper is unpublished, under embargo, covered by a collaboration agreement, or contains
+anything you are not free to disclose to a third party, decide deliberately. Consult the
+selected providers' current privacy and data-usage terms before running it.
 
 ## Usage
 
@@ -136,6 +151,9 @@ llm-reviewer paper.tex                          # review, with a confirmation pr
 llm-reviewer paper.tex --output /tmp/review     # choose the output directory
 llm-reviewer paper.tex --dry-run                # token count + cost estimate only
 llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/scripts)
+llm-reviewer paper.tex \
+  --strong-model openai:gpt-5.6-sol \
+  --fast-model anthropic:claude-sonnet-5        # mixed-provider run
 ```
 
 | Flag | Meaning |
@@ -143,15 +161,16 @@ llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/
 | `--output DIR` | Where to write results (default: `<input_dir>/review/`) |
 | `--dry-run` | Count tokens and estimate cost; send no generation requests |
 | `-y`, `--yes` | Skip the confirmation prompt. Required when stdin is not a terminal |
-| `--strong-model ID` | Model for the three deep reviewers and the final referee |
-| `--fast-model ID` | Model for the two lighter reviewers |
+| `--strong-model [PROVIDER:]ID` | Model for the three deep reviewers and final referee |
+| `--fast-model [PROVIDER:]ID` | Model for the two lighter reviewers |
 | `--max-tokens N` | Output token limit per call (default 32000, maximum 64000) |
 | `--effort LEVEL` | `low`, `medium`, `high`, `xhigh`, or `max` (default `high`) |
 | `--version` | Print the version |
 
 Exit codes: `0` success, or you declined at the confirmation prompt; `1` finished but
-some reviewer calls failed; `2` bad configuration — no credentials, an unknown or
-unusable model, nothing to review, or no terminal to confirm on without `--yes`.
+some reviewer calls failed; `2` bad configuration — missing provider credentials, an
+unknown or unusable provider/model, nothing to review, or no terminal to confirm on
+without `--yes`.
 
 ### Multi-file papers
 
@@ -160,17 +179,24 @@ the main file's directory and then the including file's. Commented-out reference
 ignored, cycles are broken, and a reference that can't be found is left alone with a
 warning rather than aborting the run.
 
-### Choosing models and effort
+### Choosing providers, models, and effort
 
 Defaults are `claude-opus-5` for the strong tier and `claude-sonnet-5` for the fast tier.
-To pin to older models:
+Bare IDs remain Anthropic for command and `state.json` compatibility. Prefix a model with
+`openai:` or `anthropic:` to select its native provider:
 
 ```bash
 llm-reviewer paper.tex --strong-model claude-opus-4-7 --fast-model claude-sonnet-4-6
+llm-reviewer paper.tex --strong-model openai:gpt-5.6-sol --fast-model claude-sonnet-5
 ```
 
-Cost estimates are available for the models listed in `MODEL_PRICING`; any other ID still
-runs, but `--dry-run` will report token counts without a price.
+The final referee always uses the strong model, including its provider. Model flags apply
+at the existing strong/fast tier boundary; there are no per-reviewer model flags.
+
+Capability validation is provider-specific. Known incompatible combinations are refused
+before spending. Reasoning reviewers receive the selected effort. For an OpenAI reviewer
+that does not reason, the adapter requests `none` where the model supports it, or omits
+the reasoning field for known non-reasoning models.
 
 `--effort` is the main cost and latency lever — it controls how much the models reason and
 spend overall. `high` is the default; drop to `medium` or `low` on a long paper or a quick
@@ -184,15 +210,16 @@ Two constraints are worth knowing:
   than limiting it. Lower it to save money and you will generally spend more. The default
   of 32000 leaves room for a deep reviewer to think its way through a long section; if you
   see truncation warnings, raise it rather than lowering it.
-- Some models reject a disabled-thinking request at `xhigh` or `max` effort. This can't
-  happen with the defaults, but `--fast-model claude-opus-5 --effort max` would hit it, so
-  the combination is refused up front with an explanation rather than failing per call.
+- Some Anthropic models reject a disabled-thinking request at `xhigh` or `max` effort.
+  This can't happen with the defaults, but `--fast-model claude-opus-5 --effort max`
+  would hit it, so the combination is refused up front with an explanation rather than
+  failing per call.
 
-If a call does exhaust its budget, it is retried once at one `--effort` level down, which
-trades some depth on that one section for getting a review at all. A second truncation is
-reported as a failed call and the run continues. Because a truncated call bills in full,
-`--dry-run` reports its worst case both ways: assuming nothing truncates, and assuming
-everything does and is retried.
+If a call does exhaust its budget, it is retried once at one provider-mapped `--effort`
+level down when that produces a different request. A second truncation is a real failure.
+An OpenAI non-reasoning call already sent with `effort=none`, for example, is not repeated
+under a lower CLI label that would send the same request. Because a truncated call bills
+in full, `--dry-run` reports a conservative retry ceiling.
 
 ### Resuming
 
@@ -258,10 +285,12 @@ findings as complete.
   it — an absolute path, or `../` climbing out — is refused with a warning rather than
   inlined, since running this on a paper from someone else would otherwise let the file
   read anything you can read and send it to the API.
-- **Prompt caching is not measured.** Repeated context should be served from cache after
-  the first call per reviewer, but the saving depends on the cache outliving the gap
-  between one reviewer's calls, which nobody here has verified against
-  `usage.cache_read_input_tokens`.
+- **Prompt caching is not measured.** Anthropic receives ephemeral cache controls on the
+  stable system blocks. OpenAI GPT-5.6 models receive explicit breakpoints on equivalent
+  developer `input_text` blocks, explicit-only cache mode, and a deterministic
+  paper-specific `prompt_cache_key`. The providers have different eligibility, lifetime,
+  and cache-write pricing rules, so `--dry-run` reports exact token counts without
+  claiming a cache saving. Inspect returned usage before quoting one.
 
 ## Contributing
 

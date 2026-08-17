@@ -5,12 +5,11 @@ from __future__ import annotations
 import argparse
 import sys
 
-import anthropic
 from rich import print
 
 from . import __version__
+from .providers import ProviderRegistry
 from .reviewer import (
-    CREDENTIALS_HELP,
     DEFAULT_EFFORT,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL_FAST,
@@ -61,14 +60,18 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ID",
         help=(
             "Model for FormalVerifier, AdversarialSkeptic, ClaimAuditor, and the final "
-            f"referee (default: {DEFAULT_MODEL_STRONG})"
+            "referee, as [provider:]model; bare IDs use Anthropic "
+            f"(default: {DEFAULT_MODEL_STRONG})"
         ),
     )
     parser.add_argument(
         "--fast-model",
         default=DEFAULT_MODEL_FAST,
         metavar="ID",
-        help=(f"Model for NotationAuditor and ExpositionReferee (default: {DEFAULT_MODEL_FAST})"),
+        help=(
+            "Model for NotationAuditor and ExpositionReferee, as [provider:]model; "
+            f"bare IDs use Anthropic (default: {DEFAULT_MODEL_FAST})"
+        ),
     )
     parser.add_argument(
         "--max-tokens",
@@ -103,14 +106,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[red]{exc}[/red]")
         return EXIT_CONFIG
 
-    client = anthropic.Anthropic()
+    models = [r.model for r in prompts.reviewers.values()]
+    models.append(prompts.strong_model)
+    try:
+        providers = ProviderRegistry.from_models(models)
+    except ConfigurationError as exc:
+        print(f"[red]{exc}[/red]")
+        return EXIT_CONFIG
 
     try:
         # Free pre-flight: proves the credentials work and the model IDs are real
         # before the run writes anything or asks the user to approve spending.
-        models = [r.model for r in prompts.reviewers.values()]
-        # The final referee's model too, in case no reviewer happens to share it.
-        check_access(client, [*models, prompts.strong_model])
+        check_access(providers, models)
     except ConfigurationError as exc:
         print(f"[red]{exc}[/red]")
         return EXIT_CONFIG
@@ -118,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.dry_run:
             run_dry_run(
-                client,
+                providers,
                 args.input,
                 prompts=prompts,
                 max_tokens=args.max_tokens,
@@ -127,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
             return EXIT_OK
 
         result = run_pipeline(
-            client,
+            providers,
             args.input,
             args.output,
             prompts=prompts,
@@ -137,9 +144,6 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ConfigurationError as exc:
         print(f"[red]{exc}[/red]")
-        return EXIT_CONFIG
-    except anthropic.AuthenticationError:
-        print(f"[red]{CREDENTIALS_HELP}[/red]")
         return EXIT_CONFIG
     except KeyboardInterrupt:
         print("\n[yellow]Interrupted. Re-run the same command to resume.[/yellow]")

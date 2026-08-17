@@ -32,7 +32,9 @@ def paper(tmp_path):
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     """Neutralise everything that would reach out, so only argument handling is under test."""
-    monkeypatch.setattr(cli.anthropic, "Anthropic", lambda: object())
+    monkeypatch.setattr(
+        cli.ProviderRegistry, "from_models", classmethod(lambda cls, models: object())
+    )
     monkeypatch.setattr(cli, "check_access", lambda client, models: None)
 
 
@@ -67,6 +69,11 @@ def test_effort_only_accepts_known_levels():
 
 def test_short_yes_flag_works():
     assert cli.build_parser().parse_args(["paper.tex", "-y"]).yes is True
+
+
+def test_provider_qualified_models_are_accepted():
+    args = cli.build_parser().parse_args(["paper.tex", "--strong-model", "openai:gpt-5.6-sol"])
+    assert args.strong_model == "openai:gpt-5.6-sol"
 
 
 # --------------------------------------------------------------------------- exit codes
@@ -131,7 +138,7 @@ def test_unusable_model_exits_two_before_any_request(paper, monkeypatch, capsys)
 
 def test_missing_credentials_exit_two(paper, monkeypatch, capsys):
     def refuse(client, models):
-        raise ConfigurationError(cli.CREDENTIALS_HELP)
+        raise ConfigurationError("No usable Anthropic credentials. Export ANTHROPIC_API_KEY.")
 
     monkeypatch.setattr(cli, "check_access", refuse)
     assert run([str(paper)], monkeypatch) == cli.EXIT_CONFIG
