@@ -6,6 +6,7 @@ transforms LaTeX text or reads files from a tmp_path fixture.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -1267,6 +1268,46 @@ def test_debris_from_an_interrupted_rename_is_swept(tmp_path):
     assert not list(reviews.glob(f"*{MOVING_SUFFIX}"))
     assert client.parse_calls == []  # sweeping debris must not invalidate a real review
     assert len(result.issues) == THREE_CALLS
+
+
+def test_resume_state_cannot_move_a_file_from_outside_reviews(tmp_path):
+    review(tmp_path, sections(*THREE))
+    state_path = tmp_path / "out" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    key = next(iter(state["completed"]))
+    reviewer = next(iter(state["completed"][key]))
+    victim = tmp_path / "victim.json"
+    victim.write_text("sentinel", encoding="utf-8")
+    state["completed"][key][reviewer] = str(victim.resolve())
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="Unsafe stored review filename"):
+        review(tmp_path, sections(*THREE))
+
+    assert victim.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_pipeline_refuses_symlink_in_managed_output_tree(tmp_path):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    chunks = tmp_path / "out" / "chunks"
+    chunks.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("sentinel", encoding="utf-8")
+    (chunks / "000_Alpha.tex").symlink_to(victim)
+    client = FakeProvider(issues_per_call=1)
+
+    with pytest.raises(ConfigurationError, match="symbolic link"):
+        run_pipeline(
+            registry(client),
+            str(source),
+            tmp_path / "out",
+            prompts=load_prompts(),
+            assume_yes=True,
+        )
+
+    assert victim.read_text(encoding="utf-8") == "sentinel"
+    assert client.parse_calls == []
 
 
 def test_declining_the_run_deletes_nothing(tmp_path, monkeypatch):

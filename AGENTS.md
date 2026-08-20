@@ -72,6 +72,10 @@ The final referee (`prompts/final_referee.md`) receives global context + all iss
 ## Invariants worth preserving
 
 - **Resume hangs off `state.json`, not off filenames.** Chunks are identified by `chunk_key` (a hash of title + text), so an inserted section does not shift every identity, and an edited section is re-reviewed while its neighbours are not. Filenames carry an index prefix so output sorts in document order, and `retarget_reviews` moves a reused review whenever its chunk's position changes, so that ordering stays true across runs. `sweep` then deletes anything neither the current chunks nor `state.json` account for. `state.json` remains the authority on which file holds which chunk's review; the filenames are for humans. A settings change (models, effort, max tokens, or the prompt text itself via `prompts_digest`) is refused rather than silently reusing incomparable reviews. The whole-paper chunk's key must be passed to `state.prune` alongside the section keys, or its reviews are discarded on every resume.
+- **Existing output is untrusted input.** A paper bundle can arrive with `review/state.json`
+  and a pre-populated output tree. Stored review names must remain validated direct
+  children of `reviews/`, and pipeline-managed directories and files must never follow
+  symbolic links; otherwise resume moves or ordinary writes can escape the output tree.
 - **`reviews/*.json` is the source of truth for issues, not `issues.jsonl`.** `all_issues.json` is rebuilt from the stored reviews each run, so a crash between writing a review and appending to the log costs at most a repeated call. `issues.jsonl` is an append-only log and may hold superseded entries.
 - **Section structure is matched against `mask_non_content(tex)`**, never the raw text, so a commented-out or verbatim-quoted `\section` neither invents a chunk nor truncates its neighbour. The mask preserves character offsets, so matches still index into the original.
 - **`\input` targets are confined to the document's directory** (`_is_within`). Papers come from other people; without this, `\input{/etc/passwd}` would exfiltrate to the API.

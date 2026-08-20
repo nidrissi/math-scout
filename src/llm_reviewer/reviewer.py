@@ -76,6 +76,12 @@ STATE_VERSION = 1
 # still carrying it is the debris of an interrupted rename and gets swept.
 MOVING_SUFFIX = ".moving"
 
+# Values read from state.json are untrusted: a paper bundle can arrive with a pre-existing
+# review directory. Stored reviews are always direct children of reviews/ and their names
+# are made exclusively from safe chunk stems and reviewer names.
+_STORED_REVIEW_RE = re.compile(r"[\w-]+\.json")
+_CHUNK_KEY_RE = re.compile(r"[0-9a-f]{16}")
+
 # Section titles (case-insensitive, LaTeX-stripped) that are skipped during review.
 _SKIP_SECTIONS = frozenset({"references", "bibliography", "acknowledgments", "acknowledgements"})
 
@@ -1073,10 +1079,10 @@ class ResumeState:
         return reviewer in self.completed.get(key, {})
 
     def review_file(self, key: str, reviewer: str) -> str:
-        return self.completed[key][reviewer]
+        return _validate_stored_review_filename(self.completed[key][reviewer])
 
     def mark(self, key: str, reviewer: str, filename: str) -> None:
-        self.completed.setdefault(key, {})[reviewer] = filename
+        self.completed.setdefault(key, {})[reviewer] = _validate_stored_review_filename(filename)
 
     def prune(self, live_keys: set[str]) -> None:
         """Forget chunks that are no longer in the document."""
@@ -1091,6 +1097,76 @@ class ResumeState:
             ),
             encoding="utf-8",
         )
+
+
+def _validate_stored_review_filename(filename: object, state_path: Path | None = None) -> str:
+    """Return a safe reviews/ basename, rejecting paths supplied through state.json."""
+    if isinstance(filename, str) and _STORED_REVIEW_RE.fullmatch(filename):
+        return filename
+    location = f" in {state_path}" if state_path is not None else ""
+    raise ConfigurationError(
+        f"Unsafe stored review filename{location}: {filename!r}. State may name only "
+        "a .json file directly inside the reviews directory."
+    )
+
+
+def _validate_completed_state(
+    completed: object, state_path: Path, reviewer_names: set[str]
+) -> dict[str, dict[str, str]]:
+    """Validate the untrusted part of state.json before any stored path is used."""
+    if not isinstance(completed, dict):
+        raise ConfigurationError(f"Invalid completed-review map in {state_path}.")
+
+    for key, reviewers in completed.items():
+        if not isinstance(key, str) or _CHUNK_KEY_RE.fullmatch(key) is None:
+            raise ConfigurationError(f"Invalid chunk key in {state_path}: {key!r}.")
+        if not isinstance(reviewers, dict):
+            raise ConfigurationError(f"Invalid reviewer map for chunk {key!r} in {state_path}.")
+        for reviewer, filename in reviewers.items():
+            if reviewer not in reviewer_names:
+                raise ConfigurationError(
+                    f"Unknown reviewer {reviewer!r} in completed-review map {state_path}."
+                )
+            _validate_stored_review_filename(filename, state_path)
+
+    return completed
+
+
+def _validate_managed_output_tree(output_dir: Path) -> None:
+    """Refuse symlinks in paths the pipeline reads, overwrites, moves, or deletes.
+
+    Output defaults beside the input paper, so a paper obtained from someone else can
+    arrive with a crafted review/ tree. Following one of its symlinks would let chunk or
+    report writes escape the output directory even when every generated filename is safe.
+    """
+    managed_dirs = (output_dir, output_dir / "reviews", output_dir / "chunks")
+    managed_files = (
+        output_dir / STATE_FILE,
+        output_dir / "issues.jsonl",
+        output_dir / "all_issues.json",
+        output_dir / "final_report.md",
+    )
+
+    for path in (*managed_dirs, *managed_files):
+        if path.is_symlink():
+            raise ConfigurationError(
+                f"Refusing to use symbolic link in pipeline-managed output: {path}"
+            )
+
+    for directory in managed_dirs:
+        if directory.exists() and not directory.is_dir():
+            raise ConfigurationError(
+                f"Pipeline-managed output path is not a directory: {directory}"
+            )
+
+    for directory in managed_dirs[1:]:
+        if not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if path.is_symlink():
+                raise ConfigurationError(
+                    f"Refusing to use symbolic link in pipeline-managed output: {path}"
+                )
 
 
 def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
@@ -1117,6 +1193,9 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
     except (OSError, ValueError) as exc:
         raise ConfigurationError(f"Cannot read {state_path}: {exc}") from exc
 
+    if not isinstance(stored, dict):
+        raise ConfigurationError(f"Invalid resume state object in {state_path}.")
+
     if stored.get("version") != STATE_VERSION:
         raise ConfigurationError(
             f"{state_path} was written by a different version of llm-reviewer. Delete the "
@@ -1131,7 +1210,10 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
             "produce. Delete the output directory or pass a different --output."
         )
 
-    return ResumeState(settings=settings, completed=stored.get("completed") or {})
+    completed = _validate_completed_state(
+        stored.get("completed"), state_path, set(settings["models"])
+    )
+    return ResumeState(settings=settings, completed=completed)
 
 
 def _describe_settings_change(old: dict, new: dict) -> str:
@@ -1173,13 +1255,20 @@ def retarget_reviews(state: ResumeState, stems: dict[str, str], reviews_dir: Pat
         if key not in stems:
             continue
         for reviewer, stored in reviewers.items():
-            wanted = f"{stems[key]}_{reviewer}.json"
+            stored = _validate_stored_review_filename(stored)
+            wanted = _validate_stored_review_filename(f"{stems[key]}_{reviewer}.json")
             if stored == wanted:
                 continue
 
             stored_path = reviews_dir / stored
             moving_path = reviews_dir / (stored + MOVING_SUFFIX)
             wanted_path = reviews_dir / wanted
+
+            for path in (stored_path, moving_path, wanted_path):
+                if path.is_symlink():
+                    raise ConfigurationError(
+                        f"Refusing to use symbolic link in pipeline-managed output: {path}"
+                    )
 
             if stored_path.is_file() or moving_path.is_file():
                 planned.append((key, reviewer, stored, wanted))
@@ -1267,6 +1356,7 @@ def run_pipeline(
     paper_stem = chunk_stem(len(chunks), paper_chunk)
 
     settings = run_settings(prompts, max_tokens=max_tokens, effort=effort)
+    _validate_managed_output_tree(output_dir)
     state = load_resume_state(output_dir, settings)
     keys = [chunk_key(chunk) for chunk in chunks]
     # The whole-paper key has to be live too, or every resume discards its reviews.

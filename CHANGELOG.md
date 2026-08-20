@@ -7,6 +7,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Resume state can no longer name a review outside `reviews/`, and pipeline-managed
+  output paths refuse symbolic links. A crafted `review/state.json` in a paper bundle
+  could previously move an arbitrary file during resume bookkeeping; pre-positioned
+  output symlinks could likewise redirect chunk or report writes.
+
 ## [0.2.0a1] — 2026-08-17
 
 **This invalidates existing output directories.** State now records qualified Anthropic
