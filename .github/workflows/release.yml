@@ -1,0 +1,99 @@
+name: Publish to PyPI
+
+on:
+    release:
+        types:
+            - published
+
+permissions:
+    contents: read
+
+concurrency:
+    group: pypi-${{ github.event.release.tag_name }}
+    cancel-in-progress: false
+
+jobs:
+    build:
+        name: Build and validate distributions
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout release
+              uses: actions/checkout@v7
+
+            - name: Set up Python
+              uses: actions/setup-python@v7
+              with:
+                  python-version: "3.14"
+
+            - name: Install uv
+              uses: astral-sh/setup-uv@v7
+              with:
+                  version: "0.12.5"
+
+            - name: Verify release tag matches package version
+              env:
+                  RELEASE_TAG: ${{ github.event.release.tag_name }}
+              run: >-
+                  python -c 'import os, sys, tomllib; version =
+                  tomllib.load(open("pyproject.toml",
+                  "rb"))["project"]["version"]; expected = f"v{version}"; actual
+                  = os.environ["RELEASE_TAG"]; print(f"release tag: {actual};
+                  package version: {version}"); sys.exit(0 if actual == expected
+                  else f"expected release tag {expected}, got {actual}")'
+
+            - name: Build source and wheel distributions
+              run: uv build
+
+            - name: Validate distribution metadata
+              run: uvx twine check dist/*
+
+            - name: Upload distributions
+              uses: actions/upload-artifact@v7
+              with:
+                  name: python-package-distributions
+                  path: dist/
+                  if-no-files-found: error
+
+    publish-testpypi:
+        name: Publish distributions to TestPyPI
+        needs: build
+        runs-on: ubuntu-latest
+        environment:
+            name: testpypi
+            url: https://test.pypi.org/p/math-scout
+        permissions:
+            id-token: write
+
+        steps:
+            - name: Download distributions
+              uses: actions/download-artifact@v8
+              with:
+                  name: python-package-distributions
+                  path: dist/
+
+            - name: Publish distributions to TestPyPI
+              uses: pypa/gh-action-pypi-publish@release/v1
+              with:
+                  repository-url: https://test.pypi.org/legacy/
+                  skip-existing: true
+
+    publish:
+        name: Publish distributions to PyPI
+        needs: publish-testpypi
+        runs-on: ubuntu-latest
+        environment:
+            name: pypi
+            url: https://pypi.org/p/math-scout
+        permissions:
+            id-token: write
+
+        steps:
+            - name: Download distributions
+              uses: actions/download-artifact@v8
+              with:
+                  name: python-package-distributions
+                  path: dist/
+
+            - name: Publish distributions to PyPI
+              uses: pypa/gh-action-pypi-publish@release/v1
