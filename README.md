@@ -1,4 +1,4 @@
-# LLM Reviewer
+# Paper Scout
 
 [![CI](https://github.com/nidrissi/paper-scout/actions/workflows/ci.yml/badge.svg)](https://github.com/nidrissi/paper-scout/actions/workflows/ci.yml)
 
