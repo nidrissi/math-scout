@@ -20,7 +20,7 @@ classifiers = [
 # The SDK floors are the versions whose streaming and structured-output request shapes
 # this code binds against. Upper bounds are deliberate: both native APIs move quickly.
 dependencies = [
-    "anthropic>=0.120,<1",
+    "anthropic>=0.120,<2",
     "openai>=3.1,<4",
     "pydantic>=2.13,<3",
     "rich>=15,<17",
