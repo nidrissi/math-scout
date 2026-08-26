@@ -169,8 +169,8 @@ First public release. Everything before this lived only in the author's working 
 
 ### Added
 
-- MIT license, packaging metadata, and a `llm-reviewer` command installable with
-  `uvx --from git+https://github.com/nidrissi/llm-reviewer`.
+- MIT license, packaging metadata, and a `paper-scout` command installable with
+  `uvx --from git+https://github.com/nidrissi/paper-scout`.
 - Multi-file LaTeX support: `\input{}` and `\include{}` are resolved and inlined before
   chunking, with commented-out references ignored, cycles broken, and missing targets
   warned about rather than fatal.
@@ -248,6 +248,6 @@ First public release. Everything before this lived only in the author's working 
 - The unused `RapidFuzz` dependency, and `.github/requirements.txt` in favour of
   `pyproject.toml`.
 
-[0.2.0a1]: https://github.com/nidrissi/llm-reviewer/releases/tag/v0.2.0a1
-[0.1.0a2]: https://github.com/nidrissi/llm-reviewer/releases/tag/v0.1.0a2
-[0.1.0a1]: https://github.com/nidrissi/llm-reviewer/releases/tag/v0.1.0a1
+[0.2.0a1]: https://github.com/nidrissi/paper-scout/releases/tag/v0.2.0a1
+[0.1.0a2]: https://github.com/nidrissi/paper-scout/releases/tag/v0.1.0a2
+[0.1.0a1]: https://github.com/nidrissi/paper-scout/releases/tag/v0.1.0a1

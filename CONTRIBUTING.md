@@ -6,8 +6,8 @@ bug reports — especially papers whose structure breaks the chunker.
 ## Setup
 
 ```bash
-git clone https://github.com/nidrissi/llm-reviewer
-cd llm-reviewer
+git clone https://github.com/nidrissi/paper-scout
+cd paper-scout
 uv sync
 ```
 

@@ -871,7 +871,7 @@ def lower_effort(effort: str) -> str | None:
 def prompt_cache_key(tex: str) -> str:
     """Return a deterministic, paper-specific cache-routing key."""
     digest = hashlib.sha256(tex.encode("utf-8")).hexdigest()[:32]
-    return f"llm-reviewer:{digest}"
+    return f"paper-scout:{digest}"
 
 
 def call_reviewer(
@@ -1198,7 +1198,7 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
 
     if stored.get("version") != STATE_VERSION:
         raise ConfigurationError(
-            f"{state_path} was written by a different version of llm-reviewer. Delete the "
+            f"{state_path} was written by a different version of paper-scout. Delete the "
             "output directory or pass a different --output."
         )
 

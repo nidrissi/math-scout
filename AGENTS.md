@@ -4,13 +4,13 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## What this project does
 
-`llm-reviewer` is a multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a `.tex` file into sections, runs five specialized Claude-based reviewers in sequence — three over each section, two over the whole source — and synthesizes a final referee report in markdown.
+`paper-scout` is a multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a `.tex` file into sections, runs five specialized Claude-based reviewers in sequence — three over each section, two over the whole source — and synthesizes a final referee report in markdown.
 
 ## Running the pipeline
 
 ```bash
 uv sync
-uv run llm-reviewer path/to/paper.tex [--output <dir>]
+uv run paper-scout path/to/paper.tex [--output <dir>]
 ```
 
 Credentials come from the Anthropic SDK's own resolution: `ANTHROPIC_API_KEY` in the environment, or a profile stored by `ant auth login`. Never pass a key inline on the command line.

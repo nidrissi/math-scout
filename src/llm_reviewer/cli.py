@@ -1,4 +1,4 @@
-"""Command-line entry point for llm-reviewer."""
+"""Command-line entry point for paper-scout."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def resolve_model_selection(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="llm-reviewer",
+        prog="paper-scout",
         description=(
             "Run multiple LLM-based reviewers on a LaTeX document, aggregating their "
             "feedback into a final report."

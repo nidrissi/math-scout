@@ -50,7 +50,7 @@ def request(
         effort=effort,
         output_limit=12_345,
         output_schema=Review if schema else None,
-        prompt_cache_key="llm-reviewer:paper-hash",
+        prompt_cache_key="paper-scout:paper-hash",
     )
 
 
@@ -246,7 +246,7 @@ def test_openai_structured_stream_uses_developer_blocks_breakpoints_and_cache_ke
     assert sent["text_format"] is Review
     assert sent["reasoning"] == {"effort": "high"}
     assert sent["max_output_tokens"] == 12_345
-    assert sent["prompt_cache_key"] == "llm-reviewer:paper-hash"
+    assert sent["prompt_cache_key"] == "paper-scout:paper-hash"
     assert sent["prompt_cache_options"] == {"mode": "explicit"}
     developer, user = sent["input"]
     assert developer["role"] == "developer"

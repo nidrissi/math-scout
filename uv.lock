@@ -264,8 +264,8 @@ wheels = [
 ]
 
 [[package]]
-name = "llm-reviewer"
-version = "0.2.0a1"
+name = "paper-scout"
+version = "0.2.0a2"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
