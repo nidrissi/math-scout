@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_reviewer.providers import (
+from math_scout.providers import (
     GenerationRequest,
     GenerationResult,
     ModelRef,
@@ -26,7 +26,7 @@ from llm_reviewer.providers import (
     ProviderServerError,
     provider_type,
 )
-from llm_reviewer.reviewer import (
+from math_scout.reviewer import (
     DEFAULT_EFFORT,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL_FAST,
@@ -68,7 +68,7 @@ from llm_reviewer.reviewer import (
     summarize_known_issues,
     validate_settings,
 )
-from llm_reviewer.reviewer import (
+from math_scout.reviewer import (
     ReviewerFailure as Failure,
 )
 
@@ -751,7 +751,7 @@ def test_call_reviewer_retries_a_normalized_transient_error(monkeypatch):
                 raise ProviderRateLimitError("slow down")
             return super().generate(request)
 
-    monkeypatch.setattr("llm_reviewer.reviewer.time.sleep", lambda delay: None)
+    monkeypatch.setattr("math_scout.reviewer.time.sleep", lambda delay: None)
     provider = FlakyProvider()
     prompts = load_prompts()
 

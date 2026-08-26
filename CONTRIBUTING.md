@@ -6,8 +6,8 @@ bug reports — especially papers whose structure breaks the chunker.
 ## Setup
 
 ```bash
-git clone https://github.com/nidrissi/llm-reviewer
-cd llm-reviewer
+git clone https://github.com/nidrissi/math-scout
+cd math-scout
 uv sync
 ```
 
@@ -32,7 +32,7 @@ fake; adapter tests use fake native clients and bind calls to installed SDK sign
 
 ## Changing prompts
 
-Prompt edits in `src/llm_reviewer/prompts/` are the highest-leverage and least testable
+Prompt edits in `src/math_scout/prompts/` are the highest-leverage and least testable
 part of this project. There is no automated check that a prompt change is an improvement,
 so please run the pipeline on a real paper before and after and say what changed in the
 PR — which issues appeared, which disappeared, and whether the new ones are real.

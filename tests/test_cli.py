@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from llm_reviewer import cli
-from llm_reviewer.reviewer import (
+from math_scout import cli
+from math_scout.reviewer import (
     DEFAULT_EFFORT,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL_FAST,

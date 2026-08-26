@@ -1,6 +1,6 @@
-# LLM Reviewer
+# Math Scout
 
-[![CI](https://github.com/nidrissi/llm-reviewer/actions/workflows/ci.yml/badge.svg)](https://github.com/nidrissi/llm-reviewer/actions/workflows/ci.yml)
+[![CI](https://github.com/nidrissi/math-scout/actions/workflows/ci.yml/badge.svg)](https://github.com/nidrissi/math-scout/actions/workflows/ci.yml)
 
 A multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a
 `.tex` file into sections, runs a set of specialised LLM-based reviewers over them — some
@@ -69,16 +69,16 @@ finding across the whole paper, and runs only once per review.
 With [uv](https://docs.astral.sh/uv/), no checkout needed:
 
 ```bash
-uvx --from git+https://github.com/nidrissi/llm-reviewer llm-reviewer paper.tex --dry-run
+uvx --from git+https://github.com/nidrissi/math-scout math-scout paper.tex --dry-run
 ```
 
 Or from a clone:
 
 ```bash
-git clone https://github.com/nidrissi/llm-reviewer
-cd llm-reviewer
+git clone https://github.com/nidrissi/math-scout
+cd math-scout
 uv sync
-uv run llm-reviewer paper.tex --dry-run
+uv run math-scout paper.tex --dry-run
 ```
 
 ## Credentials
@@ -120,7 +120,7 @@ final referee call. Every one of them reads at least a section and several read 
 paper, so on a long paper it adds up to real money.
 
 ```bash
-llm-reviewer paper.tex --dry-run
+math-scout paper.tex --dry-run
 ```
 
 This asks each selected provider for the exact input-token count of every dry-run request
@@ -147,13 +147,13 @@ selected providers' current privacy and data-usage terms before running it.
 ## Usage
 
 ```bash
-llm-reviewer paper.tex                          # review, with a confirmation prompt
-llm-reviewer paper.tex --output /tmp/review     # choose the output directory
-llm-reviewer paper.tex --dry-run                # token count + cost estimate only
-llm-reviewer paper.tex --yes                    # skip the prompt (needed in CI/scripts)
-llm-reviewer paper.tex --preset sol-luna        # OpenAI Sol for strong, Luna for fast
-llm-reviewer paper.tex --preset opus-sonnet     # Anthropic Opus for strong, Sonnet for fast
-llm-reviewer paper.tex \
+math-scout paper.tex                          # review, with a confirmation prompt
+math-scout paper.tex --output /tmp/review     # choose the output directory
+math-scout paper.tex --dry-run                # token count + cost estimate only
+math-scout paper.tex --yes                    # skip the prompt (needed in CI/scripts)
+math-scout paper.tex --preset sol-luna        # OpenAI Sol for strong, Luna for fast
+math-scout paper.tex --preset opus-sonnet     # Anthropic Opus for strong, Sonnet for fast
+math-scout paper.tex \
   --strong-model openai:gpt-5.6-sol \
   --fast-model anthropic:claude-sonnet-5        # mixed-provider run
 ```
@@ -190,12 +190,12 @@ using the same Anthropic models. Every explicit model must use `provider:model`;
 are rejected. Use a preset to keep common model pairs concise:
 
 ```bash
-llm-reviewer paper.tex --preset opus-sonnet
-llm-reviewer paper.tex --preset sol-luna
-llm-reviewer paper.tex \
+math-scout paper.tex --preset opus-sonnet
+math-scout paper.tex --preset sol-luna
+math-scout paper.tex \
   --strong-model anthropic:claude-opus-4-7 \
   --fast-model anthropic:claude-sonnet-4-6
-llm-reviewer paper.tex \
+math-scout paper.tex \
   --strong-model openai:gpt-5.6-sol \
   --fast-model anthropic:claude-sonnet-5
 ```
@@ -317,7 +317,7 @@ findings as complete.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and papers that break the chunker are
-especially welcome — [open an issue](https://github.com/nidrissi/llm-reviewer/issues).
+especially welcome — [open an issue](https://github.com/nidrissi/math-scout/issues).
 
 ## License
 
