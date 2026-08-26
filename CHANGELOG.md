@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0a2] — 2026-08-26
+
+### Changed
+
+- Renamed the project, package, and command from `llm-reviewer` to `math-scout`.
+
 ### Fixed
 
 - Resume state can no longer name a review outside `reviews/`, and pipeline-managed
@@ -248,6 +254,8 @@ First public release. Everything before this lived only in the author's working 
 - The unused `RapidFuzz` dependency, and `.github/requirements.txt` in favour of
   `pyproject.toml`.
 
+[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.2.0a2...HEAD
+[0.2.0a2]: https://github.com/nidrissi/math-scout/releases/tag/v0.2.0a2
 [0.2.0a1]: https://github.com/nidrissi/math-scout/releases/tag/v0.2.0a1
 [0.1.0a2]: https://github.com/nidrissi/math-scout/releases/tag/v0.1.0a2
 [0.1.0a1]: https://github.com/nidrissi/math-scout/releases/tag/v0.1.0a1
