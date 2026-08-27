@@ -20,7 +20,7 @@ classifiers = [
 # The SDK floors are the versions whose streaming and structured-output request shapes
 # this code binds against. Upper bounds are deliberate: both native APIs move quickly.
 dependencies = [
-    "anthropic>=0.120,<1",
+    "anthropic>=1,<2",
     "openai>=3.5,<4",
     "pydantic>=2.13,<3",
     "rich>=15,<17",
@@ -41,7 +41,10 @@ build-backend = "hatchling.build"
 packages = ["src/math_scout"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.16.4"]
+# httpx2 is the HTTP layer anthropic and openai both build on; the provider tests
+# construct native error objects with it, so declare it rather than lean on the
+# transitive install.
+dev = ["httpx2>=2", "pytest>=8", "ruff>=0.16.4"]
 
 [tool.ruff]
 line-length = 100

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import inspect
 from types import SimpleNamespace
+from typing import cast
 
 import anthropic
-import httpx
 import httpx2
 import openai
 import pytest
+from anthropic.resources.messages import Messages
 from openai.resources.responses.input_tokens import InputTokens
 from openai.resources.responses.responses import Responses
 
@@ -126,6 +127,15 @@ class FakeOpenAIClient:
         self.responses = FakeOpenAIResponses(result, error)
 
 
+def anthropic_provider(client: FakeAnthropicClient) -> AnthropicProvider:
+    """The fakes stand in structurally; the SDK client parameters are nominal types."""
+    return AnthropicProvider(cast(anthropic.Anthropic, client))
+
+
+def openai_provider(client: FakeOpenAIClient) -> OpenAIProvider:
+    return OpenAIProvider(cast(openai.OpenAI, client))
+
+
 def anthropic_response(*, parsed=None, text=None, stop_reason="end_turn"):
     content = [] if text is None else [SimpleNamespace(type="text", text=text)]
     return SimpleNamespace(
@@ -189,13 +199,13 @@ def test_luna_pricing_matches_current_provider_rates():
 
 def test_anthropic_structured_stream_shape_binds_to_installed_sdk():
     native = FakeAnthropicClient(anthropic_response(parsed=Review(issues=[])))
-    provider = AnthropicProvider(native)
+    provider = anthropic_provider(native)
 
     result = provider.generate(request("anthropic:claude-opus-5"))
 
     assert result.parsed == Review(issues=[])
     (sent,) = native.messages.stream_calls
-    inspect.signature(anthropic.resources.messages.Messages.stream).bind(None, **sent)
+    inspect.signature(Messages.stream).bind(None, **sent)
     assert sent["model"] == "claude-opus-5"
     assert sent["thinking"] == {"type": "adaptive"}
     assert sent["output_config"] == {"effort": "high"}
@@ -205,7 +215,7 @@ def test_anthropic_structured_stream_shape_binds_to_installed_sdk():
 
 def test_anthropic_markdown_stream_and_token_count_bind_to_installed_sdk():
     native = FakeAnthropicClient(anthropic_response(text="# Report"))
-    provider = AnthropicProvider(native)
+    provider = anthropic_provider(native)
     text_request = request("anthropic:claude-opus-5", schema=False, reasoning=False)
 
     assert provider.generate(text_request).text == "# Report"
@@ -213,29 +223,29 @@ def test_anthropic_markdown_stream_and_token_count_bind_to_installed_sdk():
 
     (stream_call,) = native.messages.stream_calls
     (count_call,) = native.messages.count_calls
-    inspect.signature(anthropic.resources.messages.Messages.stream).bind(None, **stream_call)
-    inspect.signature(anthropic.resources.messages.Messages.count_tokens).bind(None, **count_call)
+    inspect.signature(Messages.stream).bind(None, **stream_call)
+    inspect.signature(Messages.count_tokens).bind(None, **count_call)
     assert stream_call["thinking"] == {"type": "disabled"}
     assert "output_format" not in stream_call
 
 
 def test_anthropic_truncation_and_native_errors_are_normalized():
-    truncated = AnthropicProvider(
+    truncated = anthropic_provider(
         FakeAnthropicClient(anthropic_response(stop_reason="max_tokens"))
     ).generate(request("anthropic:claude-opus-5"))
     assert truncated.truncated is True
     assert truncated.completed is False
 
-    response = httpx.Response(401, request=httpx.Request("POST", "https://example.test"))
+    response = httpx2.Response(401, request=httpx2.Request("POST", "https://example.test"))
     error = anthropic.AuthenticationError("bad key", response=response, body=None)
-    provider = AnthropicProvider(FakeAnthropicClient(error=error))
+    provider = anthropic_provider(FakeAnthropicClient(error=error))
     with pytest.raises(ProviderAuthenticationError):
         provider.generate(request("anthropic:claude-opus-5"))
 
 
 def test_openai_structured_stream_uses_developer_blocks_breakpoints_and_cache_key():
     native = FakeOpenAIClient(openai_response(parsed=Review(issues=[])))
-    provider = OpenAIProvider(native)
+    provider = openai_provider(native)
 
     result = provider.generate(request("openai:gpt-5.6-sol"))
 
@@ -259,7 +269,7 @@ def test_openai_structured_stream_uses_developer_blocks_breakpoints_and_cache_ke
 
 def test_openai_count_is_exact_request_shape_and_never_generates():
     native = FakeOpenAIClient(openai_response(parsed=Review(issues=[])))
-    provider = OpenAIProvider(native)
+    provider = openai_provider(native)
 
     assert provider.count_tokens(request("openai:gpt-5.6-sol")) == 654
 
@@ -275,7 +285,7 @@ def test_openai_count_is_exact_request_shape_and_never_generates():
 
 def test_openai_non_reasoning_uses_none_and_has_no_duplicate_retry_request():
     native = FakeOpenAIClient(openai_response(parsed=Review(issues=[])))
-    provider = OpenAIProvider(native)
+    provider = openai_provider(native)
     non_reasoning = request("openai:gpt-5.6-sol", reasoning=False)
 
     provider.generate(non_reasoning)
@@ -286,7 +296,7 @@ def test_openai_non_reasoning_uses_none_and_has_no_duplicate_retry_request():
 
 def test_openai_known_non_reasoning_model_omits_reasoning_and_rejects_reasoning_task():
     native = FakeOpenAIClient(openai_response(parsed=Review(issues=[])))
-    provider = OpenAIProvider(native)
+    provider = openai_provider(native)
     non_reasoning = request("openai:gpt-4o", reasoning=False)
 
     provider.generate(non_reasoning)
@@ -298,26 +308,27 @@ def test_openai_known_non_reasoning_model_omits_reasoning_and_rejects_reasoning_
 
 
 def test_openai_text_truncation_refusal_empty_output_and_usage_are_normalized():
-    truncated = OpenAIProvider(
+    truncated = openai_provider(
         FakeOpenAIClient(openai_response(status="incomplete", reason="max_output_tokens"))
     ).generate(request("openai:gpt-5.6-sol", schema=False))
     assert truncated.truncated is True
 
     refusal = SimpleNamespace(content=[SimpleNamespace(type="refusal", refusal="cannot comply")])
     with pytest.raises(ProviderRefusalError, match="cannot comply"):
-        OpenAIProvider(FakeOpenAIClient(openai_response(output=[refusal]))).generate(
+        openai_provider(FakeOpenAIClient(openai_response(output=[refusal]))).generate(
             request("openai:gpt-5.6-sol", schema=False)
         )
 
     with pytest.raises(ProviderEmptyOutputError):
-        OpenAIProvider(FakeOpenAIClient(openai_response())).generate(
+        openai_provider(FakeOpenAIClient(openai_response())).generate(
             request("openai:gpt-5.6-sol", schema=False)
         )
 
-    complete = OpenAIProvider(FakeOpenAIClient(openai_response(text="# Report"))).generate(
+    complete = openai_provider(FakeOpenAIClient(openai_response(text="# Report"))).generate(
         request("openai:gpt-5.6-sol", schema=False)
     )
     assert complete.text == "# Report"
+    assert complete.usage is not None
     assert complete.usage.cached_input_tokens == 5
     assert complete.usage.cache_write_input_tokens == 6
 
@@ -325,7 +336,7 @@ def test_openai_text_truncation_refusal_empty_output_and_usage_are_normalized():
 def test_openai_native_rate_limit_is_normalized():
     response = httpx2.Response(429, request=httpx2.Request("POST", "https://example.test"))
     error = openai.RateLimitError("slow down", response=response, body=None)
-    provider = OpenAIProvider(FakeOpenAIClient(error=error))
+    provider = openai_provider(FakeOpenAIClient(error=error))
 
     with pytest.raises(ProviderRateLimitError):
         provider.generate(request("openai:gpt-5.6-sol"))
