@@ -69,7 +69,7 @@ finding across the whole paper, and runs only once per review.
 With [uv](https://docs.astral.sh/uv/), no checkout needed:
 
 ```bash
-uvx --from git+https://github.com/nidrissi/math-scout math-scout paper.tex --dry-run
+uvx math-scout paper.tex --dry-run
 ```
 
 Or from a clone:
