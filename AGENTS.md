@@ -4,7 +4,7 @@ This file provides guidance to AI agents when working with code in this reposito
 
 ## What this project does
 
-`math-scout` is a multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a `.tex` file into sections, runs five specialized Claude-based reviewers in sequence — three over each section, two over the whole source — and synthesizes a final referee report in markdown.
+`math-scout` is a multi-agent pipeline that reviews mathematical papers written in LaTeX. It splits a `.tex` file into sections, runs five specialized LLM-based reviewers in sequence — three over each section, two over the whole source — and synthesizes a final referee report in markdown. Anthropic and OpenAI models can be used separately or together.
 
 ## Running the pipeline
 
@@ -13,7 +13,7 @@ uv sync
 uv run math-scout path/to/paper.tex [--output <dir>]
 ```
 
-Credentials come from the Anthropic SDK's own resolution: `ANTHROPIC_API_KEY` in the environment, or a profile stored by `ant auth login`. Never pass a key inline on the command line.
+Credentials are required only for the providers selected by the resolved model configuration. Anthropic uses `ANTHROPIC_API_KEY` or a profile stored by `ant auth login`; OpenAI uses `OPENAI_API_KEY`. Never pass a key inline on the command line.
 
 Outputs land in `<input_dir>/review/` by default (override with `--output`):
 - `review/chunks/<NN>_<section>.tex` — the exact LaTeX each reviewer saw
@@ -32,8 +32,11 @@ Exit codes: `0` clean (or declined at the prompt — declining is a choice, not 
 ```
 src/math_scout/reviewer.py    # all pipeline logic
 src/math_scout/cli.py         # argparse, credential pre-flight, exit codes
+src/math_scout/providers/*.py # provider-neutral contracts and native SDK adapters
 src/math_scout/prompts/*.md   # shared protocol, reviewer and final-referee prompts (package data)
-tests/test_reviewer.py          # pure-function tests; no network, no credentials
+tests/test_reviewer.py        # orchestration and pure-function tests
+tests/test_providers.py       # native adapter contract tests with stubbed clients
+tests/test_cli.py             # argument parsing and exit codes
 ```
 
 ## Architecture
@@ -41,11 +44,11 @@ tests/test_reviewer.py          # pure-function tests; no network, no credential
 **Pipeline stages** (`run_pipeline`):
 1. Load `.tex`, inlining `\input{}`/`\include{}` (`resolve_inputs`), then extract global context (title + abstract + preamble + up to 15 theorems via regex)
 2. Split into `Chunk`s by `\section{}` boundaries; skip non-mathematical sections (References, Bibliography, Acknowledgments). Body text before the first `\section` becomes a "Front matter" chunk when it holds enough prose
-3. For each chunk × each section-scoped reviewer: call Claude, save per-chunk JSON, append issues to `issues.jsonl`
+3. For each chunk × each section-scoped reviewer: call its configured provider, save per-chunk JSON, append issues to `issues.jsonl`
 4. Then once over the whole source (a `Chunk` named `WHOLE_PAPER_NAME`) for each paper-scoped reviewer, so they see every section finding
 5. Run final referee over the full paper + all issues → `final_report.md`
 
-`cli.py` calls `check_access` first: a free `count_tokens` probe per distinct model that validates credentials and model IDs before anything is written or any money is spent.
+`cli.py` calls `check_access` first: a free input-token-count probe through each selected provider for every distinct model. This validates credentials and model IDs before anything is written or any generation request is sent.
 
 **Reviewers** (defined in `REVIEWER_SPECS` as `ReviewerSpec(prompt, tier, thinking, scope)`, resolved to `ReviewerConfig` by `load_prompts`):
 
@@ -57,15 +60,15 @@ tests/test_reviewer.py          # pure-function tests; no network, no credential
 | `NotationAuditor` | fast | adaptive | **paper** | Notation consistency, convention drift, undefined and broken references, circularity |
 | `ClaimAuditor` | strong | adaptive | **paper** | Overclaiming: abstract and introduction against what the theorems prove |
 
-Tiers map to concrete model IDs via `--strong-model` / `--fast-model`, defaulting to `DEFAULT_MODEL_STRONG` and `DEFAULT_MODEL_FAST`. Every reviewer returns the same JSON schema: `{ issues: [ { title, severity, type, location, quote, analysis, suggested_fix, confidence } ] }`.
+Tiers map to provider-qualified model IDs via `--strong-model` / `--fast-model`, defaulting to `DEFAULT_MODEL_STRONG` and `DEFAULT_MODEL_FAST`. `--preset opus-sonnet` and `--preset sol-luna` select common same-provider pairs; an explicit tier flag can override either half. Every reviewer returns the same JSON schema: `{ issues: [ { title, severity, type, location, quote, analysis, suggested_fix, confidence } ] }`.
 
-Thinking is a property of the task, not the tier — and scope can move a reviewer across that line, as it did for `NotationAuditor`: whole-paper consistency means tracing the order results are established in and collapsing every occurrence of a symbol into one finding, which is not the lookup that per-section consistency was. `ReviewerConfig.thinking_config` turns the flag into the API parameter. The final referee always thinks. `--effort` applies uniformly to every call.
+Thinking is a property of the task, not the tier — and scope can move a reviewer across that line, as it did for `NotationAuditor`: whole-paper consistency means tracing the order results are established in and collapsing every occurrence of a symbol into one finding, which is not the lookup that per-section consistency was. The provider adapters translate the `GenerationRequest.reasoning` flag and effort level into their native API parameters. The final referee always thinks. `--effort` applies uniformly to every call, with provider-specific validation and retry mapping.
 
 Scope is also a property of the task. Consistency and overclaiming are relations between two places in the document, so they are not decidable from one section; asking a section-scoped reviewer for them yields guesses that the final referee has to pay to discard. `LoadedPrompts.scoped()` partitions the reviewers, and `_format_review_target` labels the payload `SECTION UNDER REVIEW` or `FULL PAPER UNDER REVIEW` accordingly.
 
 **Prompt composition.** Every reviewer call sends three system blocks: global context, `prompts/review_protocol.md`, then that reviewer's own prompt. The protocol holds the payload map, the single severity and confidence scales, and the field-by-field output contract; the individual prompts hold only a lane and its exclusions. The final referee passes `review_protocol=None` — it writes markdown, not the issue schema.
 
-Each block is a cache breakpoint, and the first two are byte-identical across reviewers, so reviewers on one model share a prefix instead of writing their own. This also fixes a silent failure: the minimum cacheable prefix is model-dependent (512 tokens on Opus 5, 1024 on Sonnet 5), and a short global context did not reach it on its own; the protocol block is ~2k tokens, so the combined prefix always clears it. The saving is still **unmeasured** — check `usage.cache_read_input_tokens` before quoting a number, and consider a `ttl: "1h"` breakpoint if entries are expiring between calls.
+Each stable block is marked as a cache breakpoint, and the first two are byte-identical across reviewers, so reviewers on one model can share a prefix. Anthropic receives native ephemeral cache controls; OpenAI GPT-5.6 receives equivalent developer `input_text` breakpoints, explicit-only cache mode, and a deterministic paper-specific cache key. The saving is still **unmeasured** — inspect the provider-normalized usage before quoting a number.
 
 The final referee (`prompts/final_referee.md`) receives global context + all issues + full paper and produces a structured markdown report with seven fixed sections. When reviewer calls have failed, `format_coverage_note` goes in as its own message block ahead of `DETECTED ISSUES` so the report states its own limits without the note reading as a finding.
 
@@ -82,11 +85,11 @@ The final referee (`prompts/final_referee.md`) receives global context + all iss
 - **Reviewer prompts keep their lanes.** Each prompt says what *not* to flag, naming the reviewer that covers it. Widening one produces duplicates, not coverage. Anything that should hold for every reviewer belongs in `review_protocol.md`, not copied into five files where it will drift.
 - **Every schema field a reviewer fills is read downstream.** `_format_issue_full` carries `type`, `location`, `quote` and `confidence` into the final referee: the quote is how it checks a finding against the source, and the confidence is how it tells a demonstrated defect from a lead. A field the prompts calibrate but the report never sees is wasted tokens on every call.
 - **No pass may assert prior art.** Nothing here can read a reference, so a claim that a result is already known would be a fabrication. The protocol, `claim_auditor.md` and `final_referee.md` each forbid it independently; keep all three.
-- **Errors that would recur identically** (`FATAL_API_ERRORS`) stop the run; everything else is recorded as a per-reviewer failure and the run continues.
-- **Every generation call streams** (`messages.stream`), which is what allows `max_tokens` above 21,333 — non-streaming requests estimated to run past ten minutes are refused by the SDK. `get_final_message()` returns a `ParsedMessage`, so `output_format` and `.parsed_output` work exactly as they did under `messages.parse`. `MAX_OUTPUT_TOKENS` (64000) is only a typo guard: every model in `MODEL_SUPPORT` allows at least 64K output tokens, and the Opus 5 and Sonnet 5 families allow 128K.
+- **Errors that would recur identically** (`FATAL_PROVIDER_ERRORS`) stop the run; everything else is recorded as a per-reviewer failure and the run continues.
+- **Every generation call streams** through its provider's native SDK. Anthropic finalizes a `ParsedMessage` with `get_final_message()`; OpenAI finalizes its response with `get_final_response()`. Structured output and usage are normalized behind `GenerationResult`. `MAX_OUTPUT_TOKENS` (64000) is only a CLI typo guard; model-specific output limits live in the provider capability tables, which are checked before a run.
 - **`max_tokens` is headroom, not a budget to spend.** Thinking and the response share it, and a call cut off mid-JSON is billed in full and yields nothing — so a cap set too low *causes* cost rather than limiting it. `DEFAULT_MAX_TOKENS` is 32000 for that reason. When a reviewer truncates anyway, `call_reviewer` retries once at one `--effort` level down (`lower_effort`) and `run_final_referee` does the same; a second truncation is a real failure. Note that a retried review was produced at lower effort than `state.json` records for the run.
 - **Tests must not need the network or credentials.** Stub the client, as `FakeClient` does.
 
 ## Dependencies
 
-`anthropic`, `pydantic`, `rich`; `pytest` and `ruff` for development. All declared in `pyproject.toml` and locked in `uv.lock` — install with `uv sync`.
+`anthropic`, `openai`, `pydantic`, `rich`; `httpx2`, `pytest`, and `ruff` for development. All are declared in `pyproject.toml` and locked in `uv.lock` — install with `uv sync`.
