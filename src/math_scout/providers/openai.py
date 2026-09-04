@@ -51,11 +51,26 @@ class OpenAIProvider(Provider):
         "gpt-4.1": (None, 32_768, False),
     }
 
+    _LONG_CONTEXT = {
+        "long_context_threshold": 272_000,
+        "long_context_input_multiplier": 2.0,
+        "long_context_output_multiplier": 1.5,
+    }
+    # Sol's $4/$20 promotional rate is documented as lasting at least through
+    # 2026-11-21; re-check it when that date approaches.
     _PRICING = {
-        "gpt-5.6": Pricing(input=5.0, output=30.0, cache_read=0.5, cache_write=6.25),
-        "gpt-5.6-sol": Pricing(input=5.0, output=30.0, cache_read=0.5, cache_write=6.25),
-        "gpt-5.6-terra": Pricing(input=2.5, output=15.0, cache_read=0.25, cache_write=3.125),
-        "gpt-5.6-luna": Pricing(input=0.2, output=1.2, cache_read=0.02, cache_write=0.25),
+        "gpt-5.6": Pricing(
+            input=4.0, output=20.0, cache_read=0.4, cache_write=5.0, **_LONG_CONTEXT
+        ),
+        "gpt-5.6-sol": Pricing(
+            input=4.0, output=20.0, cache_read=0.4, cache_write=5.0, **_LONG_CONTEXT
+        ),
+        "gpt-5.6-terra": Pricing(
+            input=2.0, output=12.0, cache_read=0.2, cache_write=2.5, **_LONG_CONTEXT
+        ),
+        "gpt-5.6-luna": Pricing(
+            input=0.2, output=1.2, cache_read=0.02, cache_write=0.25, **_LONG_CONTEXT
+        ),
     }
 
     def __init__(self, client: openai_sdk.OpenAI | None = None):

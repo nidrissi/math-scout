@@ -95,6 +95,50 @@ class Pricing:
     output: float
     cache_read: float | None = None
     cache_write: float | None = None
+    long_context_threshold: int | None = None
+    long_context_input_multiplier: float = 1.0
+    long_context_output_multiplier: float = 1.0
+
+    def uses_long_context_pricing(self, input_tokens: int) -> bool:
+        return (
+            self.long_context_threshold is not None and input_tokens > self.long_context_threshold
+        )
+
+    def input_rate(self, input_tokens: int) -> float:
+        multiplier = (
+            self.long_context_input_multiplier
+            if self.uses_long_context_pricing(input_tokens)
+            else 1.0
+        )
+        return self.input * multiplier
+
+    def output_rate(self, input_tokens: int) -> float:
+        multiplier = (
+            self.long_context_output_multiplier
+            if self.uses_long_context_pricing(input_tokens)
+            else 1.0
+        )
+        return self.output * multiplier
+
+    def cache_read_rate(self, input_tokens: int) -> float | None:
+        if self.cache_read is None:
+            return None
+        multiplier = (
+            self.long_context_input_multiplier
+            if self.uses_long_context_pricing(input_tokens)
+            else 1.0
+        )
+        return self.cache_read * multiplier
+
+    def cache_write_rate(self, input_tokens: int) -> float | None:
+        if self.cache_write is None:
+            return None
+        multiplier = (
+            self.long_context_input_multiplier
+            if self.uses_long_context_pricing(input_tokens)
+            else 1.0
+        )
+        return self.cache_write * multiplier
 
 
 class ProviderError(Exception):
