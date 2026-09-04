@@ -1479,6 +1479,25 @@ def test_dry_run_groups_counts_by_qualified_model_and_marks_unknown_pricing(tmp_
     assert "pricing unknown" in out
 
 
+def test_dry_run_applies_long_context_pricing_per_request(tmp_path, capsys):
+    class LongContextOpenAIProvider(FakeOpenAIProvider):
+        def count_tokens(self, request):
+            self.count_calls.append(request)
+            return 300_001
+
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    provider = LongContextOpenAIProvider()
+    prompts = load_prompts(strong_model="openai:gpt-5.6-terra", fast_model="openai:gpt-5.6-terra")
+
+    run_dry_run(registry(provider), str(source), prompts=prompts)
+
+    out = capsys.readouterr().out
+    # Six 300,001-token requests: 2x the $2/M input rate and 1.5x the $12/M output rate.
+    assert "Estimated input cost (no cache): $7.20" in out
+    assert "Max output cost: $3.46" in out
+
+
 def test_reviews_without_a_state_file_are_refused_rather_than_ignored(tmp_path):
     review(tmp_path, sections(*THREE))
     (tmp_path / "out" / "state.json").unlink()

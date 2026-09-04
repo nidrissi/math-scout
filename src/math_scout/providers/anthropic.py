@@ -52,12 +52,12 @@ class AnthropicProvider(Provider):
     }
 
     _PRICING = {
-        "claude-opus-5": Pricing(input=5.0, output=25.0, cache_read=0.5),
-        "claude-opus-4-8": Pricing(input=5.0, output=25.0, cache_read=0.5),
-        "claude-opus-4-7": Pricing(input=5.0, output=25.0, cache_read=0.5),
-        "claude-opus-4-6": Pricing(input=5.0, output=25.0, cache_read=0.5),
-        "claude-sonnet-5": Pricing(input=3.0, output=15.0, cache_read=0.3),
-        "claude-sonnet-4-6": Pricing(input=3.0, output=15.0, cache_read=0.3),
+        "claude-opus-5": Pricing(input=5.0, output=25.0, cache_read=0.5, cache_write=6.25),
+        "claude-opus-4-8": Pricing(input=5.0, output=25.0, cache_read=0.5, cache_write=6.25),
+        "claude-opus-4-7": Pricing(input=5.0, output=25.0, cache_read=0.5, cache_write=6.25),
+        "claude-opus-4-6": Pricing(input=5.0, output=25.0, cache_read=0.5, cache_write=6.25),
+        "claude-sonnet-5": Pricing(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5),
+        "claude-sonnet-4-6": Pricing(input=3.0, output=15.0, cache_read=0.3, cache_write=3.75),
     }
 
     def __init__(self, client: anthropic.Anthropic | None = None):

@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Updated Claude Sonnet 5 and GPT-5.6 pricing metadata, including the GPT-5.6
+  long-context multipliers used by dry-run cost estimates.
+
 ## [0.2.0a2] — 2026-08-26
 
 ### Changed

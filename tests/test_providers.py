@@ -188,12 +188,40 @@ def test_registry_instantiates_only_referenced_providers():
         registry.for_model(ModelRef.parse("anthropic:claude-opus-5"))
 
 
-def test_luna_pricing_matches_current_provider_rates():
-    assert OpenAIProvider.pricing("gpt-5.6-luna") == Pricing(
-        input=0.2,
-        output=1.2,
-        cache_read=0.02,
-        cache_write=0.25,
+@pytest.mark.parametrize(
+    ("model", "input_rate", "output_rate", "cache_read", "cache_write"),
+    [
+        ("gpt-5.6", 4.0, 20.0, 0.4, 5.0),
+        ("gpt-5.6-sol", 4.0, 20.0, 0.4, 5.0),
+        ("gpt-5.6-terra", 2.0, 12.0, 0.2, 2.5),
+        ("gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25),
+    ],
+)
+def test_gpt_5_6_pricing_matches_current_provider_rates(
+    model, input_rate, output_rate, cache_read, cache_write
+):
+    pricing = OpenAIProvider.pricing(model)
+    assert pricing == Pricing(
+        input=input_rate,
+        output=output_rate,
+        cache_read=cache_read,
+        cache_write=cache_write,
+        long_context_threshold=272_000,
+        long_context_input_multiplier=2.0,
+        long_context_output_multiplier=1.5,
+    )
+    assert pricing is not None
+    assert pricing.input_rate(272_000) == input_rate
+    assert pricing.input_rate(272_001) == input_rate * 2
+    assert pricing.output_rate(272_001) == output_rate * 1.5
+
+
+def test_sonnet_5_pricing_matches_current_provider_rates():
+    assert AnthropicProvider.pricing("claude-sonnet-5") == Pricing(
+        input=2.0,
+        output=10.0,
+        cache_read=0.2,
+        cache_write=2.5,
     )
 
 

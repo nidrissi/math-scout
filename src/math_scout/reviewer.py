@@ -1598,10 +1598,12 @@ def run_dry_run(
     cache_key = prompt_cache_key(tex)
     token_totals: dict[ModelRef, int] = {}
     call_counts: dict[ModelRef, int] = {}
+    request_token_counts: dict[ModelRef, list[int]] = {}
 
     def record(model: ModelRef, tokens: int) -> None:
         token_totals[model] = token_totals.get(model, 0) + tokens
         call_counts[model] = call_counts.get(model, 0) + 1
+        request_token_counts.setdefault(model, []).append(tokens)
 
     def count_request(request: GenerationRequest) -> int:
         return providers.for_model(request.model).count_tokens(request)
@@ -1655,14 +1657,16 @@ def run_dry_run(
     total_input = sum(token_totals.values())
     unpriced = sorted(model for model in token_totals if pricing_for(model) is None)
     input_cost = sum(
-        count / 1e6 * pricing.input
-        for model, count in token_totals.items()
+        tokens / 1e6 * pricing.input_rate(tokens)
+        for model, requests in request_token_counts.items()
         if (pricing := pricing_for(model)) is not None
+        for tokens in requests
     )
     max_output_cost = sum(
-        count * max_tokens / 1e6 * pricing.output
-        for model, count in call_counts.items()
+        max_tokens / 1e6 * pricing.output_rate(tokens)
+        for model, requests in request_token_counts.items()
         if (pricing := pricing_for(model)) is not None
+        for tokens in requests
     )
     max_output_cost_with_retries = max_output_cost * MAX_ATTEMPTS_PER_CALL
 
@@ -1672,17 +1676,26 @@ def run_dry_run(
         if pricing is None:
             print(f"  {model.qualified}: {count:,} tokens [yellow](pricing unknown)[/yellow]")
             continue
+        requests = request_token_counts[model]
+        model_input_cost = sum(tokens / 1e6 * pricing.input_rate(tokens) for tokens in requests)
         cache = ""
         if pricing.cache_read is not None:
-            cache = (
-                f" (cached reads: ${pricing.cache_read}/M = "
-                f"${count / 1e6 * pricing.cache_read:.2f})"
+            cache_read_cost = sum(
+                tokens / 1e6 * pricing.cache_read_rate(tokens) for tokens in requests
             )
+            cache = f" (cached reads: ${pricing.cache_read}/M base = ${cache_read_cost:.2f})"
         if pricing.cache_write is not None:
-            cache += f" (cache writes: ${pricing.cache_write}/M)"
+            cache += f" (cache writes: ${pricing.cache_write}/M base)"
+        long_context = ""
+        if pricing.long_context_threshold is not None:
+            long_context = (
+                f"; requests above {pricing.long_context_threshold:,} input tokens use "
+                f"{pricing.long_context_input_multiplier:g}x input and "
+                f"{pricing.long_context_output_multiplier:g}x output rates"
+            )
         print(
-            f"  {model.qualified}: {count:,} tokens @ ${pricing.input}/M = "
-            f"${count / 1e6 * pricing.input:.2f}{cache}"
+            f"  {model.qualified}: {count:,} tokens @ ${pricing.input}/M base = "
+            f"${model_input_cost:.2f}{cache}{long_context}"
         )
     print(f"  Total input: {total_input:,} tokens")
 
