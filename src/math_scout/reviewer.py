@@ -194,11 +194,11 @@ class LoadedPrompts:
     reviewers: dict[str, ReviewerConfig]
     final_referee: str
     review_protocol: str
-    # The final referee runs on the same model as the strong reviewers. Recorded here
-    # rather than looked up through a reviewer name, which would break on a rename. No
-    # default: it must agree with the strong reviewers' models, and only load_prompts
-    # is in a position to make that true.
+    # Retain the effective tier selection without coupling it to a reviewer name.
     strong_model: ModelRef
+    # Presets may dedicate a separate model to synthesis; legacy selection resolves this
+    # to strong_model in load_prompts.
+    final_model: ModelRef
 
     def scoped(self, scope: ReviewerScope) -> dict[str, ReviewerConfig]:
         """The reviewers that run at *scope*, in their declared order."""
@@ -270,9 +270,11 @@ def _read_prompt(filename: str) -> str:
 def load_prompts(
     strong_model: str | ModelRef = DEFAULT_MODEL_STRONG,
     fast_model: str | ModelRef = DEFAULT_MODEL_FAST,
+    final_model: str | ModelRef | None = None,
 ) -> LoadedPrompts:
     """Read every prompt file up front so a missing one fails before any API spending."""
     models = {"strong": ModelRef.parse(strong_model), "fast": ModelRef.parse(fast_model)}
+    resolved_final_model = models["strong"] if final_model is None else ModelRef.parse(final_model)
     reviewers = {
         name: ReviewerConfig(
             name=name,
@@ -288,6 +290,7 @@ def load_prompts(
         final_referee=_read_prompt(FINAL_REFEREE_PROMPT),
         review_protocol=_read_prompt(REVIEW_PROTOCOL_PROMPT),
         strong_model=models["strong"],
+        final_model=resolved_final_model,
     )
 
 
@@ -309,7 +312,7 @@ def validate_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> N
         (reviewer.name, reviewer.model, reviewer.thinking)
         for reviewer in prompts.reviewers.values()
     ]
-    requests.append(("FinalReferee", prompts.strong_model, True))
+    requests.append(("FinalReferee", prompts.final_model, True))
     for reviewer_name, model, reasoning in sorted(requests, key=lambda item: item[0]):
         try:
             adapter = provider_type(model.provider)
@@ -1537,7 +1540,7 @@ def run_pipeline(
             issues=all_issues,
             global_context=global_context,
             system_prompt=prompts.final_referee,
-            model=prompts.strong_model,
+            model=prompts.final_model,
             max_tokens=max_tokens,
             effort=effort,
             coverage_note=format_coverage_note(result.failures),
@@ -1634,7 +1637,7 @@ def run_dry_run(
     for reviewer in prompts.scoped(ReviewerScope.PAPER).values():
         count_reviewer(paper_chunk, reviewer)
 
-    final_model = prompts.strong_model
+    final_model = prompts.final_model
     final_request = _generation_request(
         model=final_model,
         system_prompt=prompts.final_referee,

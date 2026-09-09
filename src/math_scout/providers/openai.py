@@ -41,6 +41,7 @@ class OpenAIProvider(Provider):
 
     # efforts (None means non-reasoning), max output, explicit cache breakpoints
     _CAPABILITIES: dict[str, tuple[frozenset[str] | None, int, bool]] = {
+        "gpt-6-astra": (frozenset(EFFORT_LEVELS), 128_000, True),
         "gpt-5.6": (_ALL_EFFORTS, 128_000, True),
         "gpt-5.6-sol": (_ALL_EFFORTS, 128_000, True),
         "gpt-5.6-terra": (_ALL_EFFORTS, 128_000, True),
@@ -59,6 +60,9 @@ class OpenAIProvider(Provider):
     # Sol's $4/$20 promotional rate is documented as lasting at least through
     # 2026-11-21; re-check it when that date approaches.
     _PRICING = {
+        "gpt-6-astra": Pricing(
+            input=10.0, output=50.0, cache_read=1.0, cache_write=12.5, **_LONG_CONTEXT
+        ),
         "gpt-5.6": Pricing(
             input=4.0, output=20.0, cache_read=0.4, cache_write=5.0, **_LONG_CONTEXT
         ),

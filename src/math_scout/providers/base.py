@@ -30,7 +30,8 @@ class ModelRef:
         if not separator:
             raise ConfigurationError(
                 f"Invalid model {value!r}; expected PROVIDER:MODEL. "
-                "Use --preset opus-sonnet or --preset sol-luna for a common model pair."
+                "Use --preset opus-sonnet, sol-luna, or astra-sol-luna for a known "
+                "model combination."
             )
         provider = provider.strip().lower()
         model = model.strip()

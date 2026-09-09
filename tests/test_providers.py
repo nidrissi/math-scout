@@ -191,13 +191,14 @@ def test_registry_instantiates_only_referenced_providers():
 @pytest.mark.parametrize(
     ("model", "input_rate", "output_rate", "cache_read", "cache_write"),
     [
+        ("gpt-6-astra", 10.0, 50.0, 1.0, 12.5),
         ("gpt-5.6", 4.0, 20.0, 0.4, 5.0),
         ("gpt-5.6-sol", 4.0, 20.0, 0.4, 5.0),
         ("gpt-5.6-terra", 2.0, 12.0, 0.2, 2.5),
         ("gpt-5.6-luna", 0.2, 1.2, 0.02, 0.25),
     ],
 )
-def test_gpt_5_6_pricing_matches_current_provider_rates(
+def test_openai_pricing_matches_current_provider_rates(
     model, input_rate, output_rate, cache_read, cache_write
 ):
     pricing = OpenAIProvider.pricing(model)
@@ -214,6 +215,29 @@ def test_gpt_5_6_pricing_matches_current_provider_rates(
     assert pricing.input_rate(272_000) == input_rate
     assert pricing.input_rate(272_001) == input_rate * 2
     assert pricing.output_rate(272_001) == output_rate * 1.5
+    assert pricing.cache_read_rate(272_001) == cache_read * 2
+    assert pricing.cache_write_rate(272_001) == cache_write * 2
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_gpt_6_astra_accepts_every_supported_reasoning_effort(effort):
+    OpenAIProvider.validate_request(
+        "gpt-6-astra", reasoning=True, effort=effort, output_limit=128_000
+    )
+
+
+def test_gpt_6_astra_rejects_disabled_reasoning():
+    with pytest.raises(ConfigurationError, match="does not support reasoning effort none"):
+        OpenAIProvider.validate_request(
+            "gpt-6-astra", reasoning=False, effort="high", output_limit=64_000
+        )
+
+
+def test_gpt_6_astra_enforces_its_output_limit():
+    with pytest.raises(ConfigurationError, match="at most 128,000 output tokens"):
+        OpenAIProvider.validate_request(
+            "gpt-6-astra", reasoning=True, effort="high", output_limit=128_001
+        )
 
 
 def test_sonnet_5_pricing_matches_current_provider_rates():

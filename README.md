@@ -84,8 +84,7 @@ uv run math-scout paper.tex --dry-run
 ## Credentials
 
 Only providers selected by the resolved preset and model flags are initialized or
-contacted. Bare model IDs use Anthropic, so the default command still needs only
-Anthropic credentials.
+contacted. The default command still needs only Anthropic credentials.
 
 For Anthropic, either export a key:
 
@@ -130,6 +129,11 @@ are exact; the run total is still a lower bound because it excludes the accumula
 estimates are optional metadata: a model with no trustworthy price on file still works
 and is shown as `pricing unknown`.
 
+The `astra-sol-luna` preset limits Astra to the single synthesis call. Its registered
+standard rates are $10/M input tokens, $1/M cached input, $12.50/M cache writes, and
+$50/M output. Requests above 272K input tokens use 2x input and cache rates and 1.5x
+output rates for the full request; `--dry-run` applies those multipliers per call.
+
 The output figures are the opposite — ceilings nobody reaches, since they assume every
 call emits its full `--max-tokens`. Two are printed: one assuming no call truncates, and
 one assuming every call truncates and is retried. Real spend lands well below the first.
@@ -151,11 +155,13 @@ math-scout paper.tex                          # review, with a confirmation prom
 math-scout paper.tex --output /tmp/review     # choose the output directory
 math-scout paper.tex --dry-run                # token count + cost estimate only
 math-scout paper.tex --yes                    # skip the prompt (needed in CI/scripts)
+math-scout paper.tex --preset astra-sol-luna  # Astra final, Sol strong, Luna fast
 math-scout paper.tex --preset sol-luna        # OpenAI Sol for strong, Luna for fast
 math-scout paper.tex --preset opus-sonnet     # Anthropic Opus for strong, Sonnet for fast
 math-scout paper.tex \
   --strong-model openai:gpt-5.6-sol \
-  --fast-model anthropic:claude-sonnet-5        # mixed-provider run
+  --fast-model anthropic:claude-sonnet-5 \
+  --final-model openai:gpt-6-astra               # independent synthesis model
 ```
 
 | Flag | Meaning |
@@ -163,9 +169,10 @@ math-scout paper.tex \
 | `--output DIR` | Where to write results (default: `<input_dir>/review/`) |
 | `--dry-run` | Count tokens and estimate cost; send no generation requests |
 | `-y`, `--yes` | Skip the confirmation prompt. Required when stdin is not a terminal |
-| `--preset NAME` | Set both tiers to `sol-luna` or `opus-sonnet` |
-| `--strong-model PROVIDER:MODEL` | Model for the three deep reviewers and final referee |
+| `--preset NAME` | Select `astra-sol-luna`, `sol-luna`, or `opus-sonnet` |
+| `--strong-model PROVIDER:MODEL` | Model for the three deep reviewers |
 | `--fast-model PROVIDER:MODEL` | Model for the two lighter reviewers |
+| `--final-model PROVIDER:MODEL` | Model for final synthesis (default: resolved strong model) |
 | `--max-tokens N` | Output token limit per call (default 32000, maximum 64000) |
 | `--effort LEVEL` | `low`, `medium`, `high`, `xhigh`, or `max` (default `high`) |
 | `--version` | Print the version |
@@ -186,12 +193,14 @@ warning rather than aborting the run.
 
 Defaults are `anthropic:claude-opus-5` for the strong tier and
 `anthropic:claude-sonnet-5` for the fast tier, so the command without model flags keeps
-using the same Anthropic models. Every explicit model must use `provider:model`; bare IDs
-are rejected. Use a preset to keep common model pairs concise:
+using the same Anthropic models; final synthesis follows the resolved strong model unless
+`--final-model` or a preset selects one independently. Every explicit model must use
+`provider:model`; bare IDs are rejected. Use a preset to keep common combinations concise:
 
 ```bash
 math-scout paper.tex --preset opus-sonnet
 math-scout paper.tex --preset sol-luna
+math-scout paper.tex --preset astra-sol-luna
 math-scout paper.tex \
   --strong-model anthropic:claude-opus-4-7 \
   --fast-model anthropic:claude-sonnet-4-6
@@ -200,10 +209,14 @@ math-scout paper.tex \
   --fast-model anthropic:claude-sonnet-5
 ```
 
-The presets set both tiers together: `opus-sonnet` resolves to
+The legacy presets set both tiers together: `opus-sonnet` resolves to
 `anthropic:claude-opus-5` and `anthropic:claude-sonnet-5`, while `sol-luna` resolves to
-`openai:gpt-5.6-sol` and `openai:gpt-5.6-luna`. An explicit `--strong-model` or
-`--fast-model` overrides only that tier, so
+`openai:gpt-5.6-sol` and `openai:gpt-5.6-luna`; their final referee follows the effective
+strong model, including when `--strong-model` overrides the preset. `astra-sol-luna`
+uses `openai:gpt-6-astra` for final synthesis, `openai:gpt-5.6-sol` for the strong tier,
+and `openai:gpt-5.6-luna` for the fast tier. Each explicit flag replaces its corresponding
+preset selection; for the legacy presets, the final model continues to follow the
+resolved strong model. For example,
 `--preset sol-luna --fast-model anthropic:claude-sonnet-5` is a concise mixed-provider
 configuration. State records the resolved qualified model IDs, not the preset name, so a
 preset command and its fully explicit equivalent can resume the same run.
@@ -212,13 +225,17 @@ preset command and its fully explicit equivalent can resume the same run.
 not reusable. Delete the output directory or pass a different `--output`; they are
 rejected through the normal settings-mismatch check rather than migrated.**
 
-The final referee always uses the strong model, including its provider. Model flags apply
-at the existing strong/fast tier boundary; there are no per-reviewer model flags.
+The final referee uses the independently resolved final model. Changing only
+`--final-model` reuses compatible stored reviewer JSON and regenerates the report, because
+the final report is synthesized on every run and the final model is intentionally absent
+from resumable reviewer settings. There are no per-reviewer model flags.
 
 Capability validation is provider-specific. Known incompatible combinations are refused
 before spending. Reasoning reviewers receive the selected effort. For an OpenAI reviewer
 that does not reason, the adapter requests `none` where the model supports it, or omits
-the reasoning field for known non-reasoning models.
+the reasoning field for known non-reasoning models. Astra requires reasoning, so it cannot
+serve the fast tier: `ExpositionReferee` deliberately disables reasoning. Select Astra
+with `--final-model` (or `astra-sol-luna`) instead.
 
 `--effort` is the main cost and latency lever — it controls how much the models reason and
 spend overall. `high` is the default; drop to `medium` or `low` on a long paper or a quick
@@ -259,7 +276,8 @@ each section's text, which means:
 - **Changing `--strong-model`, `--fast-model`, `--effort`, `--max-tokens`, or a prompt
   file is refused.** The stored reviews were produced under different settings, and
   presenting them as the output of the new ones would be a lie. Use a different
-  `--output` or delete the directory.
+  `--output` or delete the directory. Changing only `--final-model` is allowed because it
+  does not change the stored reviewer findings; it regenerates `final_report.md`.
 
 Before it starts, the run prints how many calls it will make and how many it is reusing,
 so you see the cost implication before confirming.
@@ -308,8 +326,8 @@ findings as complete.
   inlined, since running this on a paper from someone else would otherwise let the file
   read anything you can read and send it to the API.
 - **Prompt caching is not measured.** Anthropic receives ephemeral cache controls on the
-  stable system blocks. OpenAI GPT-5.6 models receive explicit breakpoints on equivalent
-  developer `input_text` blocks, explicit-only cache mode, and a deterministic
+  stable system blocks. OpenAI GPT-5.6 and later models receive explicit breakpoints on
+  equivalent developer `input_text` blocks, explicit-only cache mode, and a deterministic
   paper-specific `prompt_cache_key`. The providers have different eligibility, lifetime,
   and cache-write pricing rules, so `--dry-run` reports exact token counts without
   claiming a cache saving. Inspect returned usage before quoting one.
