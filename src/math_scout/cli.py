@@ -28,20 +28,34 @@ EXIT_OK = 0
 EXIT_INCOMPLETE = 1
 EXIT_CONFIG = 2
 
-MODEL_PRESETS: dict[str, tuple[str, str]] = {
-    "opus-sonnet": ("anthropic:claude-opus-5", "anthropic:claude-sonnet-5"),
-    "sol-luna": ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna"),
+MODEL_PRESETS: dict[str, tuple[str, str, str | None]] = {
+    "opus-sonnet": ("anthropic:claude-opus-5", "anthropic:claude-sonnet-5", None),
+    "sol-luna": ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna", None),
+    "astra-sol-luna": (
+        "openai:gpt-5.6-sol",
+        "openai:gpt-5.6-luna",
+        "openai:gpt-6-astra",
+    ),
 }
 
 
 def resolve_model_selection(
-    *, preset: str | None, strong_model: str | None, fast_model: str | None
-) -> tuple[str, str]:
+    *,
+    preset: str | None,
+    strong_model: str | None,
+    fast_model: str | None,
+    final_model: str | None,
+) -> tuple[str, str, str]:
     """Resolve a preset and per-tier overrides to the concrete model IDs used by a run."""
-    preset_strong, preset_fast = (
-        MODEL_PRESETS[preset] if preset is not None else (DEFAULT_MODEL_STRONG, DEFAULT_MODEL_FAST)
+    preset_strong, preset_fast, preset_final = (
+        MODEL_PRESETS[preset]
+        if preset is not None
+        else (DEFAULT_MODEL_STRONG, DEFAULT_MODEL_FAST, None)
     )
-    return strong_model or preset_strong, fast_model or preset_fast
+    resolved_strong = strong_model or preset_strong
+    resolved_fast = fast_model or preset_fast
+    resolved_final = final_model or preset_final or resolved_strong
+    return resolved_strong, resolved_fast, resolved_final
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -75,8 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="NAME",
         help=(
-            "Set both model tiers to a common pair: opus-sonnet or sol-luna. "
-            "Explicit model flags override the corresponding preset tier."
+            "Select a model combination: opus-sonnet, sol-luna, or astra-sol-luna. "
+            "Explicit model flags override the corresponding preset model."
         ),
     )
     parser.add_argument(
@@ -84,8 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PROVIDER:MODEL",
         help=(
-            "Model for FormalVerifier, AdversarialSkeptic, ClaimAuditor, and the final "
-            "referee. Explicit models must use provider:model "
+            "Model for FormalVerifier, AdversarialSkeptic, and ClaimAuditor. Explicit "
+            "models must use provider:model "
             f"(default without a preset: {DEFAULT_MODEL_STRONG})"
         ),
     )
@@ -96,6 +110,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Model for NotationAuditor and ExpositionReferee. Explicit models must use "
             f"provider:model (default without a preset: {DEFAULT_MODEL_FAST})"
+        ),
+    )
+    parser.add_argument(
+        "--final-model",
+        default=None,
+        metavar="PROVIDER:MODEL",
+        help=(
+            "Model for the final referee synthesis. Explicit models must use "
+            "provider:model (default: the resolved strong model)"
         ),
     )
     parser.add_argument(
@@ -125,19 +148,24 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     try:
-        strong_model, fast_model = resolve_model_selection(
+        strong_model, fast_model, final_model = resolve_model_selection(
             preset=args.preset,
             strong_model=args.strong_model,
             fast_model=args.fast_model,
+            final_model=args.final_model,
         )
-        prompts = load_prompts(strong_model=strong_model, fast_model=fast_model)
+        prompts = load_prompts(
+            strong_model=strong_model,
+            fast_model=fast_model,
+            final_model=final_model,
+        )
         validate_settings(prompts, max_tokens=args.max_tokens, effort=args.effort)
     except ConfigurationError as exc:
         print(f"[red]{exc}[/red]")
         return EXIT_CONFIG
 
     models = [r.model for r in prompts.reviewers.values()]
-    models.append(prompts.strong_model)
+    models.append(prompts.final_model)
     try:
         providers = ProviderRegistry.from_models(models)
     except ConfigurationError as exc:

@@ -56,11 +56,13 @@ def test_defaults_match_the_library():
     assert args.preset is None
     assert args.strong_model is None
     assert args.fast_model is None
+    assert args.final_model is None
     assert cli.resolve_model_selection(
         preset=args.preset,
         strong_model=args.strong_model,
         fast_model=args.fast_model,
-    ) == (DEFAULT_MODEL_STRONG, DEFAULT_MODEL_FAST)
+        final_model=args.final_model,
+    ) == (DEFAULT_MODEL_STRONG, DEFAULT_MODEL_FAST, DEFAULT_MODEL_STRONG)
     assert args.max_tokens == DEFAULT_MAX_TOKENS
     assert args.effort == DEFAULT_EFFORT
     assert args.yes is False
@@ -78,8 +80,17 @@ def test_short_yes_flag_works():
 
 
 def test_provider_qualified_models_are_accepted():
-    args = cli.build_parser().parse_args(["paper.tex", "--strong-model", "openai:gpt-5.6-sol"])
+    args = cli.build_parser().parse_args(
+        [
+            "paper.tex",
+            "--strong-model",
+            "openai:gpt-5.6-sol",
+            "--final-model",
+            "openai:gpt-6-astra",
+        ]
+    )
     assert args.strong_model == "openai:gpt-5.6-sol"
+    assert args.final_model == "openai:gpt-6-astra"
 
 
 @pytest.mark.parametrize(
@@ -87,18 +98,30 @@ def test_provider_qualified_models_are_accepted():
     [
         (
             "opus-sonnet",
-            ("anthropic:claude-opus-5", "anthropic:claude-sonnet-5"),
+            (
+                "anthropic:claude-opus-5",
+                "anthropic:claude-sonnet-5",
+                "anthropic:claude-opus-5",
+            ),
         ),
-        ("sol-luna", ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna")),
+        (
+            "sol-luna",
+            ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna", "openai:gpt-5.6-sol"),
+        ),
+        (
+            "astra-sol-luna",
+            ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna", "openai:gpt-6-astra"),
+        ),
     ],
 )
-def test_model_presets_select_both_tiers(preset, models):
+def test_model_presets_resolve_all_three_model_roles(preset, models):
     args = cli.build_parser().parse_args(["paper.tex", "--preset", preset])
     assert (
         cli.resolve_model_selection(
             preset=args.preset,
             strong_model=args.strong_model,
             fast_model=args.fast_model,
+            final_model=args.final_model,
         )
         == models
     )
@@ -110,12 +133,29 @@ def test_model_presets_select_both_tiers(preset, models):
         (
             "--strong-model",
             "anthropic:claude-opus-5",
-            ("anthropic:claude-opus-5", "openai:gpt-5.6-luna"),
+            (
+                "anthropic:claude-opus-5",
+                "openai:gpt-5.6-luna",
+                "anthropic:claude-opus-5",
+            ),
         ),
         (
             "--fast-model",
             "anthropic:claude-sonnet-5",
-            ("openai:gpt-5.6-sol", "anthropic:claude-sonnet-5"),
+            (
+                "openai:gpt-5.6-sol",
+                "anthropic:claude-sonnet-5",
+                "openai:gpt-5.6-sol",
+            ),
+        ),
+        (
+            "--final-model",
+            "anthropic:claude-opus-5",
+            (
+                "openai:gpt-5.6-sol",
+                "openai:gpt-5.6-luna",
+                "anthropic:claude-opus-5",
+            ),
         ),
     ],
 )
@@ -126,6 +166,7 @@ def test_explicit_model_overrides_one_preset_tier(flag, override, expected):
             preset=args.preset,
             strong_model=args.strong_model,
             fast_model=args.fast_model,
+            final_model=args.final_model,
         )
         == expected
     )
@@ -136,11 +177,83 @@ def test_unknown_model_preset_is_rejected():
         cli.build_parser().parse_args(["paper.tex", "--preset", "turbo"])
 
 
+def test_astra_preset_keeps_its_dedicated_final_model_when_strong_is_overridden():
+    args = cli.build_parser().parse_args(
+        [
+            "paper.tex",
+            "--preset",
+            "astra-sol-luna",
+            "--strong-model",
+            "anthropic:claude-opus-5",
+        ]
+    )
+
+    assert cli.resolve_model_selection(
+        preset=args.preset,
+        strong_model=args.strong_model,
+        fast_model=args.fast_model,
+        final_model=args.final_model,
+    ) == (
+        "anthropic:claude-opus-5",
+        "openai:gpt-5.6-luna",
+        "openai:gpt-6-astra",
+    )
+
+
+def test_explicit_final_model_overrides_the_astra_preset():
+    args = cli.build_parser().parse_args(
+        [
+            "paper.tex",
+            "--preset",
+            "astra-sol-luna",
+            "--final-model",
+            "anthropic:claude-opus-5",
+        ]
+    )
+
+    assert cli.resolve_model_selection(
+        preset=args.preset,
+        strong_model=args.strong_model,
+        fast_model=args.fast_model,
+        final_model=args.final_model,
+    ) == (
+        "openai:gpt-5.6-sol",
+        "openai:gpt-5.6-luna",
+        "anthropic:claude-opus-5",
+    )
+
+
+def test_astra_preset_initializes_and_preflights_all_three_models(paper, tmp_path, monkeypatch):
+    constructed = []
+    preflighted = []
+
+    def from_models(cls, models):
+        constructed.extend(models)
+        return object()
+
+    def check_access(providers, models):
+        preflighted.extend(models)
+
+    monkeypatch.setattr(cli.ProviderRegistry, "from_models", classmethod(from_models))
+    monkeypatch.setattr(cli, "check_access", check_access)
+    result = PipelineResult(output_dir=tmp_path)
+
+    assert run([str(paper), "--preset", "astra-sol-luna"], monkeypatch, result=result) == 0
+    expected = {
+        "openai:gpt-6-astra",
+        "openai:gpt-5.6-sol",
+        "openai:gpt-5.6-luna",
+    }
+    assert {model.qualified for model in constructed} == expected
+    assert {model.qualified for model in preflighted} == expected
+
+
 @pytest.mark.parametrize(
     ("flag", "value"),
     [
         ("--strong-model", "claude-opus-5"),
         ("--fast-model", "gpt-5.6-luna"),
+        ("--final-model", "gpt-6-astra"),
         ("--strong-model", "synthetic-model"),
     ],
 )

@@ -550,6 +550,19 @@ def test_load_prompts_applies_the_requested_models():
     assert prompts.reviewers["NotationAuditor"].model == ModelRef.parse("anthropic:fast-y")
     assert prompts.reviewers["ExpositionReferee"].model == ModelRef.parse("anthropic:fast-y")
     assert prompts.strong_model == ModelRef.parse("anthropic:strong-x")
+    assert prompts.final_model == ModelRef.parse("anthropic:strong-x")
+
+
+def test_load_prompts_can_resolve_a_dedicated_final_model():
+    prompts = load_prompts(
+        strong_model="openai:gpt-5.6-sol",
+        fast_model="openai:gpt-5.6-luna",
+        final_model="openai:gpt-6-astra",
+    )
+
+    assert prompts.strong_model == ModelRef.parse("openai:gpt-5.6-sol")
+    assert prompts.final_model == ModelRef.parse("openai:gpt-6-astra")
+    assert all(r.model.model != "gpt-6-astra" for r in prompts.reviewers.values())
 
 
 def test_load_prompts_rejects_unqualified_programmatic_model():
@@ -564,6 +577,7 @@ def test_load_prompts_accepts_mixed_provider_models():
     assert prompts.reviewers["FormalVerifier"].model == ModelRef("openai", "gpt-5.6-sol")
     assert prompts.reviewers["ExpositionReferee"].model == ModelRef("anthropic", "claude-sonnet-5")
     assert prompts.strong_model == ModelRef("openai", "gpt-5.6-sol")
+    assert prompts.final_model == prompts.strong_model
 
 
 def test_the_issue_block_is_named_once_and_matches_what_the_pipeline_sends():
@@ -883,6 +897,12 @@ def test_validate_settings_rejects_a_model_that_cannot_take_effort_at_all():
         validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="high")
 
 
+def test_validate_settings_rejects_astra_on_the_fast_tier():
+    prompts = load_prompts(fast_model="openai:gpt-6-astra")
+    with pytest.raises(ConfigurationError, match="reasoning effort none.*ExpositionReferee"):
+        validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="high")
+
+
 def test_validate_settings_rejects_an_effort_the_model_lacks():
     """xhigh arrived with Opus 4.7; 4.6 accepts only low/medium/high/max."""
     prompts = load_prompts(strong_model="anthropic:claude-opus-4-6")
@@ -907,6 +927,15 @@ def test_state_settings_qualify_every_provider_model():
     )
     assert mixed["models"]["FormalVerifier"] == "openai:gpt-5.6-sol"
     assert mixed["models"]["ExpositionReferee"] == "anthropic:claude-sonnet-5"
+
+
+def test_final_model_is_not_part_of_resumable_reviewer_settings():
+    inherited = run_settings(load_prompts(), DEFAULT_MAX_TOKENS, "high")
+    dedicated = run_settings(
+        load_prompts(final_model="openai:gpt-6-astra"), DEFAULT_MAX_TOKENS, "high"
+    )
+
+    assert dedicated == inherited
 
 
 def test_validate_settings_rejects_unknown_provider():
@@ -1090,6 +1119,28 @@ def test_mixed_providers_route_reviewers_and_final_referee_by_tier(tmp_path):
     assert len(result.issues) == 5
 
 
+def test_dedicated_final_model_routes_only_synthesis_to_its_provider(tmp_path):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    anthropic_provider = FakeProvider(issues_per_call=1)
+    openai_provider = FakeOpenAIProvider(issues_per_call=1)
+    prompts = load_prompts(final_model="openai:gpt-6-astra")
+
+    result = run_pipeline(
+        registry(anthropic_provider, openai_provider),
+        str(source),
+        tmp_path / "out",
+        prompts=prompts,
+        assume_yes=True,
+    )
+
+    assert len(anthropic_provider.parse_calls) == 5
+    assert anthropic_provider.create_calls == []
+    assert openai_provider.parse_calls == []
+    assert [call.model.qualified for call in openai_provider.create_calls] == ["openai:gpt-6-astra"]
+    assert len(result.issues) == 5
+
+
 def test_openai_only_run_routes_every_generation_to_one_provider(tmp_path):
     source = tmp_path / "paper.tex"
     source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
@@ -1137,6 +1188,28 @@ def test_resume_makes_no_calls_and_no_duplicates_when_nothing_changed(tmp_path):
     assert second.parse_calls == []
     assert len(r2.issues) == THREE_CALLS
     assert Counter(i.location for i in r2.issues) == Counter(i.location for i in r1.issues)
+
+
+def test_changing_only_final_model_reuses_reviews_and_regenerates_report(tmp_path):
+    tex = sections(*THREE)
+    review(tmp_path, tex)
+    source = tmp_path / "paper.tex"
+    anthropic_provider = FakeProvider(issues_per_call=1)
+    openai_provider = FakeOpenAIProvider()
+
+    result = run_pipeline(
+        registry(anthropic_provider, openai_provider),
+        str(source),
+        tmp_path / "out",
+        prompts=load_prompts(final_model="openai:gpt-6-astra"),
+        assume_yes=True,
+    )
+
+    assert anthropic_provider.parse_calls == []
+    assert anthropic_provider.create_calls == []
+    assert [call.model.qualified for call in openai_provider.create_calls] == ["openai:gpt-6-astra"]
+    assert len(result.issues) == THREE_CALLS
+    assert result.report_path is not None
 
 
 def test_the_whole_paper_pass_runs_once_and_survives_a_resume(tmp_path):
@@ -1477,6 +1550,20 @@ def test_dry_run_groups_counts_by_qualified_model_and_marks_unknown_pricing(tmp_
     assert "openai:gpt-5.6-sol" in out
     assert "anthropic:future-fast" in out
     assert "pricing unknown" in out
+
+
+def test_dry_run_routes_the_final_count_and_cost_to_the_dedicated_model(tmp_path, capsys):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    anthropic_provider = FakeProvider()
+    openai_provider = FakeOpenAIProvider()
+    prompts = load_prompts(final_model="openai:gpt-6-astra")
+
+    run_dry_run(registry(anthropic_provider, openai_provider), str(source), prompts=prompts)
+
+    assert len(anthropic_provider.count_calls) == 5
+    assert [call.model.qualified for call in openai_provider.count_calls] == ["openai:gpt-6-astra"]
+    assert "openai:gpt-6-astra" in capsys.readouterr().out
 
 
 def test_dry_run_applies_long_context_pricing_per_request(tmp_path, capsys):
