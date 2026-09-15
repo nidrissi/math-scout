@@ -7,10 +7,29 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0a1] — 2026-09-15
+
+### Added
+
+- Independent final-referee model selection through `--final-model`. Changing only the
+  synthesis model reuses compatible stored reviewer findings and regenerates the report.
+- The `astra-sol-luna` preset, which uses GPT-6 Astra for final synthesis, GPT-5.6 Sol for
+  strong reviewers, and GPT-5.6 Luna for fast reviewers.
+
+### Changed
+
+- OpenAI prompt-cache breakpoints now apply to GPT-5.6 and later models, including Astra.
+- Refreshed the locked Anthropic, OpenAI, Pydantic, httpx2, and Ruff dependencies.
+
 ### Fixed
 
 - Updated Claude Sonnet 5 and GPT-5.6 pricing metadata, including the GPT-5.6
   long-context multipliers used by dry-run cost estimates.
+
+### Security
+
+- Pinned third-party GitHub Actions to full commit hashes and restricted CI's default
+  token permissions to read-only repository contents.
 
 ## [0.2.0a2] — 2026-08-26
 
@@ -259,7 +278,8 @@ First public release. Everything before this lived only in the author's working 
 - The unused `RapidFuzz` dependency, and `.github/requirements.txt` in favour of
   `pyproject.toml`.
 
-[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.2.0a2...HEAD
+[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.3.0a1...HEAD
+[0.3.0a1]: https://github.com/nidrissi/math-scout/compare/v0.2.0a2...v0.3.0a1
 [0.2.0a2]: https://github.com/nidrissi/math-scout/releases/tag/v0.2.0a2
 [0.2.0a1]: https://github.com/nidrissi/math-scout/releases/tag/v0.2.0a1
 [0.1.0a2]: https://github.com/nidrissi/math-scout/releases/tag/v0.1.0a2

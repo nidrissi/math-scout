@@ -53,11 +53,11 @@ severity scale, one confidence scale, and one description of what each output fi
 contain. Individual prompts hold only their lane and what they must leave to others.
 
 Extended thinking is enabled per reviewer, on the shape of the task rather than the tier.
-Deciding whether a proof step actually follows, or building a counterexample, is multi-step
-reasoning and benefits from it. Checking that a symbol was defined before use, or that a
-`\ref` resolves, is scanning and matching — it gains nothing from thinking and would cost
-tokens and latency for it. The final referee thinks too: it weighs and prioritises every
-finding across the whole paper, and runs only once per review.
+Deciding whether a proof step actually follows, building a counterexample, or tracing
+notation and dependencies across a whole paper is multi-step reasoning and benefits from
+it. The section-scoped exposition pass is scanning and matching, so it runs without
+thinking. The final referee thinks too: it weighs and prioritises every finding across the
+whole paper, and runs only once per review.
 
 ## Requirements
 
