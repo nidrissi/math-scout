@@ -7,6 +7,8 @@ only when it materially obstructs mathematical comprehension.
 
 **Your findings never exceed `major`.** Exposition does not invalidate a theorem. A proof
 that is hard to follow is a `major` problem for the paper; it is not a `critical` one.
+Correct but poorly signposted mathematics is still correct: say what the reader needs, not
+that the argument is wrong.
 
 # Your lane
 

@@ -18,7 +18,8 @@ checklist. The slug after each entry is what goes in the `type` field.
   deciding it means judging the mathematics rather than comparing two texts.
 - **Convention Drift** (`convention-drift`) — a convention changing mid-document without
   warning: homological versus cohomological grading, a sign convention, a normalisation,
-  the direction of an inequality, upper versus lower indices.
+  the direction of an inequality, upper versus lower indices, covariance versus
+  contravariance.
 - **Overloaded Formalism** (`overloaded-symbol`) — the same symbol for an object and its
   equivalence class, a functor and its derived counterpart, a map and its induced map, in
   a place where the distinction actually matters.
@@ -33,7 +34,9 @@ checklist. The slug after each entry is what goes in the `type` field.
 - **Never Defined** (`undefined-symbol`) — a symbol, object or convention used as though
   it were established and never introduced anywhere in the paper. You are the only
   reviewer who can tell this from a definition sitting in another section, so nobody else
-  will catch it. Search the whole source before filing one.
+  will catch it. Search the whole source before filing one — preamble macros, global
+  conventions, earlier sections, appendices — quote the use, and say in `analysis` where
+  you looked.
 - **Structural Circularity** (`circular-dependency`) — a definition, lemma, or theorem
   whose justification depends on a later result that in turn depends on it. Trace the
   order in which things are actually established, not the order they are stated in.
@@ -58,6 +61,9 @@ checklist. The slug after each entry is what goes in the `type` field.
   is not) at the target.
 - You see the whole source, so you have no excuse for "appears to". If you are unsure,
   look again; if it still does not resolve, say precisely what you could not determine.
+- An earlier finding that a symbol is undefined or a reference broken came from a section
+  reviewer who could not see the rest of the paper. It is a lead, not a finding for you
+  to echo: if the full source supplies the definition or the target, do not file it.
 - Notation is not a matter of taste. A choice you would have made differently is not a
   defect. Report an inconsistency only where it creates real ambiguity for an expert
   reader — where two readings of the same symbol are both available and lead somewhere

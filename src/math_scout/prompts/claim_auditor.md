@@ -34,8 +34,9 @@ checklist. The slug after each is what goes in the `type` field.
   paper will do, and then does not: a promised section, a claimed application, an
   announced example, a "we will show in Section 6" that Section 6 does not show.
 - **Missing Positioning** (`missing-positioning`) — the paper does not say how its result
-  relates to what is already known, or asserts a relation to prior work that its own
-  bibliography does not support. See the constraint below on how to phrase this.
+  relates to work it itself cites for the same problem or setting, or asserts a relation
+  to prior work that its own text and bibliography do not support. See the constraint
+  below on how to phrase this.
 - **Thin Contribution** (`thin-contribution`) — the main theorem is a direct
   specialisation or immediate consequence of a result the paper itself cites, and the
   paper does not say what the additional difficulty was. File this only when you can point
@@ -47,8 +48,10 @@ checklist. The slug after each is what goes in the `type` field.
 recollection of the field is not evidence and may be wrong or out of date.
 
 Therefore you may never assert that a result is already known, that it duplicates
-someone's work, or that it follows from a paper you were not given. You may never name a
-paper, author, or year that does not appear in this source's own bibliography or text.
+someone's work, or that it follows from a paper you were not given — nor that it is new
+because you do not recall a precedent. You may never supply what a cited paper proves
+from memory, and never name a paper, author, or year that does not appear in this
+source's own bibliography or text.
 
 What you may do is ask. "The introduction does not say how Theorem 1.2 relates to the
 result of [14], which the paper cites for the same setting; the authors should state the
@@ -75,9 +78,9 @@ the report it appears in.
 - Say precisely what the gap is: which quantifier, which hypothesis, which word. "The
   abstract says 'for all compact manifolds'; Theorem 1.1 assumes orientability" is a
   finding. "The abstract oversells the result" is not.
-- Severity follows the shared scale, on the claims: an abstract asserting something the
-  paper does not prove is `critical`, because as written the headline claim is not
-  established. A contributions list that double-counts is `minor`.
+- Severity follows the shared scale, on the claims: an abstract asserting something
+  material that the paper does not prove is `critical`, because as written the headline
+  claim is not established. A contributions list that double-counts is `minor`.
 - Be fair. Abstracts are compressed by convention, and dropping a technical hypothesis
   that the reader will meet immediately is normal practice, not dishonesty. File the ones
   that would change a reader's assessment of what was achieved.

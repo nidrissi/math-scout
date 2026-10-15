@@ -7,6 +7,45 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+Prompts brought back in line with the `referee` skill in Mathbox, which was ported from
+these prompts and refined since.
+
+**This invalidates existing output directories.** The review protocol and the reviewer
+prompts changed, so a `review/` made with the old prompts is refused rather than mixed
+with findings from the new ones. Delete it, or pass a different `--output`.
+
+### Changed
+
+- The final report has eight sections: `Main mathematical concerns`, `Other mathematical
+  concerns`, `Exposition and organization`, `Claim and scope assessment`, and an `Overall
+  assessment` that replaces `Recommendation`. The pipeline is told nothing about the venue
+  or its standards, so it no longer issues an accept-or-reject verdict. It says what the
+  paper establishes and what it does not. Claim calibration has its own section instead of
+  competing with mathematical defects for space among the main concerns.
+- The final referee now rebuilds every alleged failed implication or counterexample
+  before reporting it, and grades severity and confidence from that check rather than
+  taking the reviewer's grades. It drops findings whose quote it cannot find in the source,
+  and does not count agreement between reviewers as evidence.
+- A counterexample now counts only once it is checked against every hypothesis of the
+  statement, global conventions included, and its conclusion is shown to fail.
+  `AdversarialSkeptic` also checks that any witness lies in the claimed domain. Induction
+  base cases are now listed among the degenerate cases it probes.
+- `FormalVerifier` checks what population a computer calculation or table actually
+  covers, and does not accept finite evidence as proof beyond the range checked. On
+  citation drift it states what the cited result would have to say for the application
+  to go through.
+- The shared protocol now distinguishes five kinds of conclusion: invalid inference, gap,
+  missing context, presentation, and uncertainty about cited work. It treats `DETECTED
+  ISSUES` as unchecked leads and asks for one finding per recurring defect. It also allows
+  a materially overclaimed headline to be `critical`, which `ClaimAuditor` already
+  required.
+- Prior-art rules now also forbid inferring that a result is new, and forbid filling in a
+  cited result's content from memory. `ClaimAuditor`'s missing-positioning check is
+  limited to work the paper itself cites.
+- `NotationAuditor` reports where it searched before filing an undefined symbol. It no
+  longer echoes a section reviewer's "undefined" or "broken reference" lead that the full
+  source resolves.
+
 ## [0.3.0a1] — 2026-09-15
 
 ### Added

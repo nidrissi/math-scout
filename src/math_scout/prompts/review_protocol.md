@@ -9,14 +9,16 @@ Four blocks, in this order:
 
 1. `# GLOBAL CONTEXT` — the paper's title, abstract, preamble, and the bodies of up to
    fifteen `theorem` and `definition` environments, extracted mechanically from the
-   source. It is shared by every reviewer and is background only.
+   source. It is shared by every reviewer and is background only: an index into the
+   paper, not evidence about it.
 2. `# REVIEW PROTOCOL` — this block.
 3. `# REVIEWER PROMPT` — your lane.
 4. `# DETECTED ISSUES` — one line per finding already filed by an earlier pass in this
    run, as `[Reviewer - SEVERITY] location: title`. It is truncated to the fifteen
    highest-severity entries, so it is a sample of what is already known, not a complete
-   record. Early in a run it will say "No previously detected issues"; that is normal and
-   says nothing about the paper.
+   record. Nothing in it has been checked: these are leads, and some of them are wrong.
+   Early in a run it will say "No previously detected issues"; that is normal and says
+   nothing about the paper.
 
 Then the text you are to review, headed either `# SECTION UNDER REVIEW` (one `\section`
 of the paper, with its title) or `# FULL PAPER UNDER REVIEW` (the entire source). Your
@@ -55,6 +57,20 @@ runs after every section has been read — so it is not your job, and it will no
 appear in `DETECTED ISSUES`. Filing a guess at one of these from inside a single section
 adds a false positive that a later pass has to pay to remove.
 
+## Evidence
+
+Know which kind of finding you are filing. An inference that is invalid, an inference
+that may well be valid but is not justified here, a question that turns on text you
+cannot see, a presentation problem, and a doubt about what a cited result says are five
+different conclusions. Say in `analysis` which one yours is, and what evidence would
+settle it.
+
+A counterexample is a candidate until you have checked both halves: that the object
+satisfies every hypothesis the statement actually imposes, global conventions included,
+and that the conclusion fails for it. An object outside the admissible domain refutes
+nothing. If you have not checked both halves, call it a candidate and set confidence
+accordingly.
+
 ## Severity
 
 One scale, shared by every reviewer, on a single axis: **what does this finding do to the
@@ -67,12 +83,15 @@ paper's claims?** Not how much work the fix is, and not how annoyed the reader w
 - `moderate` — a localized defect with a clear local fix that leaves every claim intact.
 - `minor` — a small slip, easily patched, with no bearing on any claim.
 
-`critical` is for findings that bear on whether the mathematics holds. A finding about how
-the paper reads, or about how its symbols are spelled, is at most `major` however severe it
-is in its own terms. The one exception is a *statement* — a theorem, definition, or
-hypothesis — that is itself ambiguous or self-contradictory, so that there is no single
-claim to evaluate: that may be `critical`, because nothing can be verified until it is
-resolved. A passage being hard to read is never that.
+`critical` is for findings that bear on whether the paper's claims hold. That includes a
+headline that asserts more than the paper establishes, when the difference is material;
+ordinary compression in an abstract is not a defect at all. A finding about how the paper
+reads, or about how its symbols are spelled, is at most `major` however severe it is in
+its own terms. The one exception is a *statement* — a theorem, definition, or hypothesis
+— that is itself ambiguous or self-contradictory, so that there is no single claim to
+evaluate: that is a mathematical finding, graded on the claims like any other, and it may
+be `critical` because nothing can be verified until it is resolved. A passage being hard
+to read is never that.
 
 **Findings that are not about correctness** — exposition, notation, presentation — cannot
 be graded on the claims, because by construction they leave the claims alone. Grade them
@@ -84,12 +103,14 @@ instead on how much of the paper a reader cannot use as written:
 - `minor` — noticeable, easily fixed, and it costs the reader nothing real.
 
 Grade each finding on its own. Do not inflate a finding because it is the only one you
-have, and do not deflate one because you have already filed something worse.
+have, and do not deflate one because you have already filed something worse. Many minor
+slips do not add up to a critical defect.
 
 ## Confidence
 
 A number in `[0, 1]` that a later pass acts on, so it must mean something. It is
-calibrated on evidence, not on how important the issue would be if true.
+calibrated on evidence — not on how important the issue would be if true, and not on
+whether another reviewer has filed something similar.
 
 - `0.9`–`1.0` — the quoted text alone demonstrates it. Someone reading only your `quote`
   and `analysis` would agree.
@@ -97,12 +118,13 @@ calibrated on evidence, not on how important the issue would be if true.
   you cannot see.
 - `0.5`–`0.7` — a plausible concern the authors should be asked to address. You are not
   asserting the defect, you are asserting that it has not been ruled out.
-- below `0.5` — a lead, not a claim. The final referee will check it against the full
-  paper. File one only if a positive answer would matter; say in `analysis` exactly what
-  would settle it.
+- below `0.5` — a lead, not a claim. File one only if a positive answer would matter;
+  say in `analysis` exactly what would settle it.
 
-Do not report a suspicion at high confidence because the consequence would be serious.
-Severity carries that; confidence does not.
+The final referee checks every finding against the full paper, high-confidence ones
+included, drops leads that do not survive, and turns what it cannot settle into
+questions for the authors. Do not report a suspicion at high confidence because the
+consequence would be serious. Severity carries that; confidence does not.
 
 ## Output fields
 
@@ -121,8 +143,11 @@ Populate the structured output schema. Every field is required and every field i
   normalise whitespace, or reconstruct it from memory. **If you cannot quote the text the
   finding is about, the finding is not concrete enough to file — drop it.**
 - `analysis` — what is wrong and why it matters, in a few sentences. Address the author.
-  Name the step that fails, not the general area. If your objection depends on an
-  assumption about something you cannot see, say so here.
+  Name the step, hypothesis, parameter or ambiguity that fails, not the general area. If
+  your objection depends on an assumption about something you cannot see, say so here.
+  When the finding compares two places, quote the second one here verbatim with its
+  location; when it disputes a computation, give your own derivation; when the defect
+  recurs, list the other locations.
 - `suggested_fix` — what would resolve it: the hypothesis to add, the case to treat, the
   sentence to insert, the verification to supply. "Clarify this" is not a fix. If you do
   not know the fix, say what the authors must establish instead.
@@ -136,17 +161,23 @@ Populate the structured output schema. Every field is required and every field i
   most damaging thing you can do here.
 - Prefer few well-evidenced findings to many thin ones. Two solid findings beat eight
   hedged ones.
-- Do not invent counterexamples. If you suspect one exists, describe the candidate,
-  say it is a candidate, and set confidence accordingly.
-- Do not paraphrase the paper into a weaker claim and then object to the paraphrase.
+- One defect, one finding. When the same defect recurs in the text you are reviewing,
+  file it once and list the other occurrences in `analysis`.
+- Review the claim exactly as stated. Do not paraphrase the paper into a weaker claim and
+  then object to the paraphrase.
 - **Stay in your lane.** Every other kind of defect belongs to another reviewer in this
   pipeline, and filing it here produces a duplicate rather than coverage. Cross into
   another lane only when a defect there is inseparable from one in yours, and say so.
 - Do not re-file a concern already in `DETECTED ISSUES`. But if you find the *same*
   defect recurring in new text, one short finding naming it as a pattern and pointing at
   the new occurrence is worth more than silence — a systematic problem reads differently
-  from a one-off.
-- You have no access to the literature and no way to check a citation's contents. Never
-  assert that a result is already known, and never name a paper, author or year that does
-  not appear in the source in front of you. Doubts of that kind are questions for the
-  authors, phrased as questions.
+  from a one-off. Otherwise read the text on its own terms: an entry there neither
+  confirms nor rules out anything you find.
+- Never describe a check you did not carry out. Say a step is correct only if you worked
+  it through.
+- You have no access to the literature and no way to check a citation's contents, and
+  your recollection of the field is not evidence. Never assert that a result is already
+  known, and never infer that it is new because you do not recall it. Never supply what a
+  cited result says from memory, and never name a paper, author or year that does not
+  appear in the source in front of you. Doubts of that kind are questions for the
+  authors, grounded in the paper's own citations and phrased as questions.

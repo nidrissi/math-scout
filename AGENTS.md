@@ -70,7 +70,7 @@ Scope is also a property of the task. Consistency and overclaiming are relations
 
 Each stable block is marked as a cache breakpoint, and the first two are byte-identical across reviewers, so reviewers on one model can share a prefix. Anthropic receives native ephemeral cache controls; OpenAI GPT-5.6 receives equivalent developer `input_text` breakpoints, explicit-only cache mode, and a deterministic paper-specific cache key. The saving is still **unmeasured** — inspect the provider-normalized usage before quoting a number.
 
-The final referee (`prompts/final_referee.md`) receives global context + all issues + full paper and produces a structured markdown report with seven fixed sections. When reviewer calls have failed, `format_coverage_note` goes in as its own message block ahead of `DETECTED ISSUES` so the report states its own limits without the note reading as a finding.
+The final referee (`prompts/final_referee.md`) receives global context + all issues + full paper and produces a structured markdown report with eight fixed sections and no accept-or-reject recommendation. When reviewer calls have failed, `format_coverage_note` goes in as its own message block ahead of `DETECTED ISSUES` so the report states its own limits without the note reading as a finding.
 
 ## Invariants worth preserving
 
