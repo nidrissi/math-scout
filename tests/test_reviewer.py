@@ -45,6 +45,7 @@ from math_scout.reviewer import (
     Review,
     ReviewerScope,
     SeverityLevel,
+    SplitLevel,
     _build_messages,
     _build_system,
     _format_issue_full,
@@ -52,6 +53,7 @@ from math_scout.reviewer import (
     call_reviewer,
     check_access,
     chunk_by_section,
+    chunk_key,
     chunk_stem,
     extract_global_context,
     format_coverage_note,
@@ -141,6 +143,89 @@ def test_front_matter_chunk_skipped_when_only_title_and_abstract():
 def test_front_matter_chunk_skipped_when_intro_is_short():
     tex = paper("\\maketitle\nA sentence.\n\\section{One}\nx")
     assert [c.name for c in chunk_by_section(tex)] == ["One"]
+
+
+SUB = SplitLevel.SUBSECTION
+
+
+def test_subsection_split_cuts_at_each_subsection_and_names_the_parent():
+    tex = paper("\\section{Main}\n\\subsection{First}\naaa\n\\subsection*{Second}\nbbb")
+    chunks = chunk_by_section(tex, SUB)
+    assert [c.name for c in chunks] == ["Main › First", "Main › Second"]
+    assert "aaa" in chunks[0].content
+    assert "bbb" not in chunks[0].content
+    assert "bbb" in chunks[1].content
+
+
+def test_subsection_split_folds_a_short_lead_in_into_the_first_subsection():
+    tex = paper(
+        "\\section{Main}\\label{sec:main}\nShort.\n"
+        "\\subsection{First}\naaa\n\\subsection{Second}\nbbb"
+    )
+    chunks = chunk_by_section(tex, SUB)
+    assert [c.name for c in chunks] == ["Main › First", "Main › Second"]
+    assert chunks[0].content.startswith("\\section{Main}")
+    assert "Short." in chunks[0].content
+    assert "Short." not in chunks[1].content
+
+
+def test_subsection_split_keeps_a_substantial_lead_in_as_its_own_chunk():
+    lead = "Setting up the section. " * 40  # comfortably over the threshold
+    tex = paper(f"\\section{{Main}}\n{lead}\n\\subsection{{First}}\naaa")
+    chunks = chunk_by_section(tex, SUB)
+    assert [c.name for c in chunks] == ["Main", "Main › First"]
+    assert "Setting up" in chunks[0].content
+    assert "Setting up" not in chunks[1].content
+
+
+def test_subsection_split_does_not_count_comments_as_lead_in_prose():
+    draft = "% a long commented-out draft of the section introduction\n" * 40
+    tex = paper(f"\\section{{Main}}\n{draft}\\subsection{{First}}\naaa")
+    assert [c.name for c in chunk_by_section(tex, SUB)] == ["Main › First"]
+
+
+def test_subsection_split_keeps_a_lead_in_whose_subsection_is_skipped():
+    """Dropping an acknowledgments subsection must not drop the remarks in front of it."""
+    tex = paper("\\section{Remarks}\nClosing words.\n\\subsection*{Acknowledgments}\nthanks")
+    chunks = chunk_by_section(tex, SUB)
+    assert [c.name for c in chunks] == ["Remarks"]
+    assert "Closing words." in chunks[0].content
+    assert "thanks" not in chunks[0].content
+
+
+def test_subsection_split_leaves_an_undivided_section_exactly_as_section_split_does():
+    """Same name and text means the same key, so its stored reviews survive a switch."""
+    tex = paper("\\section{Plain}\nppp\n\\section{Main}\n\\subsection{First}\naaa")
+    by_section, by_subsection = chunk_by_section(tex), chunk_by_section(tex, SUB)
+    assert by_subsection[0] == by_section[0]
+    assert chunk_key(by_subsection[0]) == chunk_key(by_section[0])
+
+
+def test_subsection_split_drops_a_skipped_section_with_its_subsections():
+    tex = paper("\\section{Main}\nx\n\\section{References}\n\\subsection{Primary}\nrefs")
+    assert [c.name for c in chunk_by_section(tex, SUB)] == ["Main"]
+
+
+def test_subsection_split_ignores_commented_out_and_verbatim_subsections():
+    tex = paper(
+        "\\section{Main}\n\\subsection{First}\naaa\n% \\subsection{Hidden}\n"
+        "\\begin{verbatim}\n\\subsection{Quoted}\n\\end{verbatim}\nbbb"
+    )
+    chunks = chunk_by_section(tex, SUB)
+    assert [c.name for c in chunks] == ["Main › First"]
+    assert "bbb" in chunks[0].content
+
+
+def test_only_subsection_split_finds_chunks_in_a_subsection_only_document():
+    tex = paper("\\subsection{First}\naaa\n\\subsection{Second}\nbbb")
+    assert chunk_by_section(tex) == []
+    assert [c.name for c in chunk_by_section(tex, SUB)] == ["First", "Second"]
+
+
+def test_subsection_split_keeps_front_matter_before_the_first_heading():
+    intro = "Introductory prose. " * 40
+    tex = paper(f"\\maketitle\n{intro}\n\\section{{One}}\n\\subsection{{A}}\nx")
+    assert [c.name for c in chunk_by_section(tex, SUB)] == [FRONT_MATTER_NAME, "One › A"]
 
 
 # -------------------------------------------------------------------------- filenames
@@ -1233,6 +1318,27 @@ def test_resume_reviews_only_the_new_chunk_when_one_is_inserted(tmp_path):
     assert len(client.parse_calls) == SECTION_CALLS + PAPER_CALLS
     assert len(result.issues) == 4 * SECTION_CALLS + PAPER_CALLS
     assert max(Counter(i.location for i in result.issues).values()) == SECTION_CALLS
+
+
+def test_switching_to_subsection_split_reviews_only_the_subdivided_section(tmp_path):
+    """The split level is not a setting: a chunk that is the same at both levels keeps
+    its reviews, and only the subdivided section's are replaced."""
+    tex = sections(("Alpha", "aaa"), ("Beta", "\\subsection{One}\nb1\n\\subsection{Two}\nb2"))
+    review(tmp_path, tex)
+    client, result = review(tmp_path, tex, split=SplitLevel.SUBSECTION)
+
+    # Two new subsection chunks. Alpha and the whole-paper pass are reused: the source
+    # did not change, so neither did their keys.
+    assert len(client.parse_calls) == 2 * SECTION_CALLS
+    assert Counter(i.location for i in result.issues) == {
+        "Alpha": SECTION_CALLS,
+        "Beta › One": SECTION_CALLS,
+        "Beta › Two": SECTION_CALLS,
+        WHOLE_PAPER_NAME: PAPER_CALLS,
+    }
+    # The section-level reviews of Beta were swept, not left beside their replacements.
+    reviews = list((tmp_path / "out" / "reviews").glob("*.json"))
+    assert len(reviews) == 3 * SECTION_CALLS + PAPER_CALLS
 
 
 # ------------------------------------------------------------------ output hygiene

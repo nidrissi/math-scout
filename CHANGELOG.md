@@ -7,12 +7,24 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.0a1] — 2026-10-15
+
 Prompts brought back in line with the `referee` skill in Mathbox, which was ported from
 these prompts and refined since.
 
 **This invalidates existing output directories.** The review protocol and the reviewer
 prompts changed, so a `review/` made with the old prompts is refused rather than mixed
 with findings from the new ones. Delete it, or pass a different `--output`.
+
+### Added
+
+- `--split subsection` hands the section-scoped reviewers one `\subsection` at a time
+  instead of one `\section`, for papers whose sections are too long to review well in one
+  call. A section's text before its first subsection goes with that subsection unless it
+  is long enough to stand alone, and a section with no subsections is still reviewed
+  whole. Switching levels on an existing output directory reuses every chunk that is the
+  same at both levels. A document organised only by `\subsection`, which used to be
+  rejected, can now be reviewed with this flag.
 
 ### Changed
 
@@ -317,7 +329,8 @@ First public release. Everything before this lived only in the author's working 
 - The unused `RapidFuzz` dependency, and `.github/requirements.txt` in favour of
   `pyproject.toml`.
 
-[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.3.0a1...HEAD
+[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.4.0a1...HEAD
+[0.4.0a1]: https://github.com/nidrissi/math-scout/compare/v0.3.0a1...v0.4.0a1
 [0.3.0a1]: https://github.com/nidrissi/math-scout/compare/v0.2.0a2...v0.3.0a1
 [0.2.0a2]: https://github.com/nidrissi/math-scout/releases/tag/v0.2.0a2
 [0.2.0a1]: https://github.com/nidrissi/math-scout/releases/tag/v0.2.0a1

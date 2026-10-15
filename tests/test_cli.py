@@ -17,6 +17,7 @@ from math_scout.reviewer import (
     ConfigurationError,
     PipelineResult,
     ReviewerFailure,
+    SplitLevel,
 )
 
 
@@ -68,11 +69,34 @@ def test_defaults_match_the_library():
     assert args.yes is False
     assert args.dry_run is False
     assert args.output is None
+    assert args.split is SplitLevel.SECTION
 
 
 def test_effort_only_accepts_known_levels():
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["paper.tex", "--effort", "turbo"])
+
+
+def test_split_only_accepts_known_levels():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["paper.tex", "--split", "chapter"])
+
+
+def test_split_reaches_both_the_pipeline_and_the_dry_run(paper, monkeypatch, tmp_path):
+    seen = {}
+
+    def capture(name):
+        def fake(*args, **kwargs):
+            seen[name] = kwargs["split"]
+            return PipelineResult(output_dir=tmp_path)
+
+        return fake
+
+    monkeypatch.setattr(cli, "run_pipeline", capture("pipeline"))
+    monkeypatch.setattr(cli, "run_dry_run", capture("dry run"))
+    assert cli.main([str(paper), "--split", "subsection", "-y"]) == cli.EXIT_OK
+    assert cli.main([str(paper), "--split", "subsection", "--dry-run"]) == cli.EXIT_OK
+    assert seen == {"pipeline": SplitLevel.SUBSECTION, "dry run": SplitLevel.SUBSECTION}
 
 
 def test_short_yes_flag_works():

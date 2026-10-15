@@ -113,8 +113,9 @@ permission, and missing-model failures name the provider that rejected the check
 
 ## Cost
 
-**Start with `--dry-run`.** A full review makes one API call per section per
-section-scoped reviewer, one whole-paper call for each paper-scoped reviewer, and one
+**Start with `--dry-run`.** A full review makes one API call per section (or subsection,
+with `--split subsection`) per section-scoped reviewer, one whole-paper call for each
+paper-scoped reviewer, and one
 final referee call. Every one of them reads at least a section and several read the whole
 paper, so on a long paper it adds up to real money.
 
@@ -139,6 +140,16 @@ call emits its full `--max-tokens`. Two are printed: one assuming no call trunca
 one assuming every call truncates and is retried. Real spend lands well below the first.
 
 Before a real run starts, the tool prints the chunks it extracted and asks you to confirm.
+
+### Splitting at subsections
+
+By default the section passes read one `\section` at a time. If a paper's sections are
+long, `--split subsection` hands them one `\subsection` at a time instead. Each call has
+less to get through, so it is less likely to run out of `--max-tokens`. The trade-off
+is that it sees less of the surrounding argument. A section with no subsections is still
+reviewed whole. A section's text before its first subsection is reviewed together with
+that subsection, unless it is long enough to stand alone. The whole-paper passes and the
+final referee are unaffected. Try `--dry-run` at both levels to compare call counts.
 
 ## Privacy
 
@@ -175,6 +186,7 @@ math-scout paper.tex \
 | `--final-model PROVIDER:MODEL` | Model for final synthesis (default: resolved strong model) |
 | `--max-tokens N` | Output token limit per call (default 32000, maximum 64000) |
 | `--effort LEVEL` | `low`, `medium`, `high`, `xhigh`, or `max` (default `high`) |
+| `--split LEVEL` | Cut the paper at each `section` or each `subsection` for the section passes (default `section`) |
 | `--version` | Print the version |
 
 Exit codes: `0` success, or you declined at the confirmation prompt; `1` finished but
@@ -278,6 +290,10 @@ each section's text, which means:
   presenting them as the output of the new ones would be a lie. Use a different
   `--output` or delete the directory. Changing only `--final-model` is allowed because it
   does not change the stored reviewer findings; it regenerates `final_report.md`.
+- **Changing `--split` is allowed.** It changes which chunks exist, not how any one of
+  them is reviewed. A section that comes out the same at both levels keeps its reviews,
+  and so do the whole-paper passes. Only the newly cut chunks are reviewed, and the reviews
+  they replace are deleted.
 
 Before it starts, the run prints how many calls it will make and how many it is reusing,
 so you see the cost implication before confirming.

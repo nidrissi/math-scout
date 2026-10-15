@@ -21,7 +21,8 @@ Four blocks, in this order:
    nothing about the paper.
 
 Then the text you are to review, headed either `# SECTION UNDER REVIEW` (one `\section`
-of the paper, with its title) or `# FULL PAPER UNDER REVIEW` (the entire source). Your
+of the paper, with its title — or, when the run splits finer, one `\subsection`, titled
+`Section › Subsection`) or `# FULL PAPER UNDER REVIEW` (the entire source). Your
 `# REVIEWER PROMPT` block tells you which one you get.
 
 ## What you can and cannot see

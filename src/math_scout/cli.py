@@ -17,6 +17,7 @@ from .reviewer import (
     EFFORT_LEVELS,
     MAX_OUTPUT_TOKENS,
     ConfigurationError,
+    SplitLevel,
     check_access,
     load_prompts,
     run_dry_run,
@@ -140,6 +141,17 @@ def build_parser() -> argparse.ArgumentParser:
             f"fewer tokens, higher reasons more (default: {DEFAULT_EFFORT})"
         ),
     )
+    parser.add_argument(
+        "--split",
+        type=SplitLevel,
+        default=SplitLevel.SECTION,
+        choices=list(SplitLevel),
+        help=(
+            "Heading level at which the paper is cut for the section-scoped reviewers. "
+            "subsection gives each call a smaller slice, at the cost of more calls and "
+            f"less surrounding text in each (default: {SplitLevel.SECTION})"
+        ),
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return parser
 
@@ -188,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
                 prompts=prompts,
                 max_tokens=args.max_tokens,
                 effort=args.effort,
+                split=args.split,
             )
             return EXIT_OK
 
@@ -199,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             max_tokens=args.max_tokens,
             effort=args.effort,
             assume_yes=args.yes,
+            split=args.split,
         )
     except ConfigurationError as exc:
         print(f"[red]{exc}[/red]")

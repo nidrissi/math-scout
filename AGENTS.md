@@ -23,7 +23,7 @@ Outputs land in `<input_dir>/review/` by default (override with `--output`):
 - `review/issues.jsonl` — append-only log of every issue ever produced here; may contain superseded entries
 - `review/final_report.md` — final synthesis in markdown
 
-Use `--dry-run` to count tokens and estimate cost without sending generation requests, and `--yes` to skip the confirmation prompt in non-interactive contexts.
+Use `--dry-run` to count tokens and estimate cost without sending generation requests, and `--yes` to skip the confirmation prompt in non-interactive contexts. `--split subsection` cuts the section passes at each `\subsection` instead of each `\section`.
 
 Exit codes: `0` clean (or declined at the prompt — declining is a choice, not an error), `1` finished with failed reviewer calls, `2` misconfigured (no credentials, unknown or unusable model, nothing to review, no terminal to confirm on without `--yes`).
 
@@ -43,7 +43,7 @@ tests/test_cli.py             # argument parsing and exit codes
 
 **Pipeline stages** (`run_pipeline`):
 1. Load `.tex`, inlining `\input{}`/`\include{}` (`resolve_inputs`), then extract global context (title + abstract + preamble + up to 15 theorems via regex)
-2. Split into `Chunk`s by `\section{}` boundaries; skip non-mathematical sections (References, Bibliography, Acknowledgments). Body text before the first `\section` becomes a "Front matter" chunk when it holds enough prose
+2. Split into `Chunk`s by `\section{}` boundaries; skip non-mathematical sections (References, Bibliography, Acknowledgments). Body text before the first `\section` becomes a "Front matter" chunk when it holds enough prose. With `SplitLevel.SUBSECTION`, each `\subsection` starts a chunk too, named `Section › Subsection`. A section's lead-in is folded into its first subsection unless it holds enough prose to stand alone. A section without subsections comes out exactly as it does at the section level
 3. For each chunk × each section-scoped reviewer: call its configured provider, save per-chunk JSON, append issues to `issues.jsonl`
 4. Then once over the whole source (a `Chunk` named `WHOLE_PAPER_NAME`) for each paper-scoped reviewer, so they see every section finding
 5. Run final referee over the full paper + all issues → `final_report.md`
@@ -74,7 +74,7 @@ The final referee (`prompts/final_referee.md`) receives global context + all iss
 
 ## Invariants worth preserving
 
-- **Resume hangs off `state.json`, not off filenames.** Chunks are identified by `chunk_key` (a hash of title + text), so an inserted section does not shift every identity, and an edited section is re-reviewed while its neighbours are not. Filenames carry an index prefix so output sorts in document order, and `retarget_reviews` moves a reused review whenever its chunk's position changes, so that ordering stays true across runs. `sweep` then deletes anything neither the current chunks nor `state.json` account for. `state.json` remains the authority on which file holds which chunk's review; the filenames are for humans. A settings change (models, effort, max tokens, or the prompt text itself via `prompts_digest`) is refused rather than silently reusing incomparable reviews. The whole-paper chunk's key must be passed to `state.prune` alongside the section keys, or its reviews are discarded on every resume.
+- **Resume hangs off `state.json`, not off filenames.** Chunks are identified by `chunk_key` (a hash of title + text), so an inserted section does not shift every identity, and an edited section is re-reviewed while its neighbours are not. Filenames carry an index prefix so output sorts in document order, and `retarget_reviews` moves a reused review whenever its chunk's position changes, so that ordering stays true across runs. `sweep` then deletes anything neither the current chunks nor `state.json` account for. `state.json` remains the authority on which file holds which chunk's review; the filenames are for humans. A settings change (models, effort, max tokens, or the prompt text itself via `prompts_digest`) is refused rather than silently reusing incomparable reviews. The split level is deliberately not a setting: it changes which chunks exist, which `chunk_key` already tracks. So switching it reuses every chunk that is the same at both levels. Keep the `SECTION UNDER REVIEW` header independent of the split level, or that reuse stops being sound. The whole-paper chunk's key must be passed to `state.prune` alongside the section keys, or its reviews are discarded on every resume.
 - **Existing output is untrusted input.** A paper bundle can arrive with `review/state.json`
   and a pre-populated output tree. Stored review names must remain validated direct
   children of `reviews/`, and pipeline-managed directories and files must never follow

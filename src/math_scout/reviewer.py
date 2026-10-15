@@ -85,10 +85,18 @@ _CHUNK_KEY_RE = re.compile(r"[0-9a-f]{16}")
 # Section titles (case-insensitive, LaTeX-stripped) that are skipped during review.
 _SKIP_SECTIONS = frozenset({"references", "bibliography", "acknowledgments", "acknowledgements"})
 
-# Matches \section{...} and \section*{...} headings.
-# Hacky: at most one level of nested braces in section titles is supported,
+# A braced heading title. Hacky: at most one level of nested braces is supported,
 # which is typically enough.
-SECTION_RE = re.compile(r"\\section\*?\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}")
+_TITLE = r"\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}"
+
+# Matches \section{...} and \section*{...} headings.
+SECTION_RE = re.compile(r"\\section\*?" + _TITLE)
+
+# Matches \section and \subsection headings alike; group 1 says which, group 2 is the title.
+HEADING_RE = re.compile(r"\\(section|subsection)\*?" + _TITLE)
+
+# Matches \label{...}, so a section's lead-in is not counted as prose for carrying one.
+_LABEL_RE = re.compile(r"\\label\{[^{}]*\}")
 
 # Matches LaTeX commands: \cmd{text} → text, or bare \cmd → "".
 _LATEX_CMD_RE = re.compile(r"\\[a-zA-Z]+\{([^{}]*)\}|\\[a-zA-Z]+")
@@ -100,9 +108,15 @@ INPUT_RE = re.compile(r"\\(?:input|include)\s*(?:\{([^{}]+)\}|\s([^\s{}\\%]+))")
 MAX_INPUT_DEPTH = 10
 
 # Material between \begin{document} and the first \section is reviewed as its own
-# chunk, but only when it holds this much prose beyond the abstract and title.
+# chunk, but only when it holds this much prose beyond the abstract and title. The same
+# threshold decides whether a section's text before its first \subsection stands alone
+# when splitting at subsections.
 FRONT_MATTER_MIN_CHARS = 500
 FRONT_MATTER_NAME = "Front matter"
+
+# Joins a section title to a subsection title in a subsection chunk's name, so reviewers
+# and file names both show where in the paper the slice sits.
+SUBSECTION_SEPARATOR = " › "
 
 # Name of the pseudo-chunk handed to paper-scoped reviewers. It carries the whole
 # document, so it goes through the same chunk machinery — files, hashing, resume — as a
@@ -112,10 +126,17 @@ WHOLE_PAPER_NAME = "(whole paper)"
 
 @dataclass
 class Chunk:
-    """A named slice of a LaTeX document corresponding to one \\section{}."""
+    """A named slice of a LaTeX document: one \\section{}, or one \\subsection{}."""
 
-    name: str  # section title extracted from \section{...}
-    content: str  # raw LaTeX from this section's heading to the next one
+    name: str  # heading title; a subsection's is prefixed with its section's
+    content: str  # raw LaTeX from this heading to the next one
+
+
+class SplitLevel(StrEnum):
+    """Which heading level the document is cut at for the section-scoped reviewers."""
+
+    SECTION = "section"
+    SUBSECTION = "subsection"
 
 
 class SeverityLevel(StrEnum):
@@ -599,32 +620,48 @@ TITLE_RE = re.compile(
 BEGIN_DOCUMENT_RE = re.compile(r"\\begin\{document\}")
 
 
-def _front_matter(tex: str, masked: str, first_section_start: int) -> str | None:
-    """Return the body text before the first \\section, if it holds enough real prose."""
+def _has_enough_prose(text: str) -> bool:
+    """Whether *text* holds enough to be worth a chunk, and so a set of calls, of its own."""
+    return len(text.strip()) >= FRONT_MATTER_MIN_CHARS
+
+
+def _front_matter(tex: str, masked: str, first_heading_start: int) -> str | None:
+    """Return the body text before the first heading, if it holds enough real prose."""
     match = BEGIN_DOCUMENT_RE.search(masked)
     body_start = match.end() if match else 0
-    if body_start >= first_section_start:
+    if body_start >= first_heading_start:
         return None
 
-    front = tex[body_start:first_section_start]
+    front = tex[body_start:first_heading_start]
     # The title and abstract already reach reviewers through the global context, so they
     # should not on their own justify an extra chunk.
     probe = ABSTRACT_RE.sub("", front)
     probe = re.sub(r"\\(?:maketitle|tableofcontents)\b", "", probe)
-    if len(probe.strip()) < FRONT_MATTER_MIN_CHARS:
+    if not _has_enough_prose(probe):
         return None
     return front
 
 
-def chunk_by_section(tex: str) -> list[Chunk]:
+def _is_skipped(title: str) -> bool:
+    """Whether a heading names a non-mathematical part, such as the references."""
+    # Strip LaTeX commands and normalize for skip-list comparison.
+    plain = _LATEX_CMD_RE.sub(lambda m: m.group(1) or "", title).strip().lower()
+    return plain in _SKIP_SECTIONS
+
+
+def chunk_by_section(tex: str, split: SplitLevel = SplitLevel.SECTION) -> list[Chunk]:
     """Split a LaTeX string into Chunks at each \\section boundary.
 
     Non-mathematical sections are skipped, and body text preceding the first section is
     kept as a leading chunk when it holds enough prose to be worth reviewing. Headings
     are matched against the comment- and verbatim-masked text, so a commented-out
-    \\section neither invents a chunk nor truncates the one it sits in.
+    \\section neither invents a chunk nor truncates the one it sits in. With
+    `SplitLevel.SUBSECTION`, every \\subsection starts a chunk as well.
     """
     masked = mask_non_content(tex)
+    if split is SplitLevel.SUBSECTION:
+        return _chunk_by_subsection(tex, masked)
+
     matches = list(SECTION_RE.finditer(masked))
     chunks = []
 
@@ -635,13 +672,67 @@ def chunk_by_section(tex: str) -> list[Chunk]:
 
     for i, match in enumerate(matches):
         title = match.group(1)
-        # Strip LaTeX commands and normalize for skip-list comparison.
-        plain = _LATEX_CMD_RE.sub(lambda m: m.group(1) or "", title).strip().lower()
-        if plain in _SKIP_SECTIONS:
+        if _is_skipped(title):
             continue
         start = match.start()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(tex)
         chunks.append(Chunk(name=title, content=tex[start:end]))
+    return chunks
+
+
+def _chunk_by_subsection(tex: str, masked: str) -> list[Chunk]:
+    """Split at every \\section and \\subsection, naming each subsection after its section.
+
+    A section without subsections comes out exactly as `chunk_by_section` cuts it at the
+    section level, so its key, and any review stored under it, is the same at either
+    level. The text between a section's heading and its first subsection is folded into
+    that subsection unless it holds enough prose to stand alone: a chunk that is little
+    more than `\\section{Proofs}\\label{sec:proofs}` would cost a full set of reviewer
+    calls and give them nothing to read.
+    """
+    headings = list(HEADING_RE.finditer(masked))
+    chunks = []
+
+    if headings:
+        front = _front_matter(tex, masked, headings[0].start())
+        if front is not None:
+            chunks.append(Chunk(name=FRONT_MATTER_NAME, content=front))
+
+    parent: str | None = None
+    parent_skipped = False
+    pending: Chunk | None = None  # a short lead-in, waiting for its first subsection
+    for i, match in enumerate(headings):
+        level, title = match.group(1), match.group(2)
+        start = match.start()
+        end = headings[i + 1].start() if i + 1 < len(headings) else len(tex)
+        chunk = Chunk(name=title, content=tex[start:end])
+
+        if level == "section":
+            parent, parent_skipped = title, _is_skipped(title)
+            if parent_skipped:
+                continue
+            has_subsections = i + 1 < len(headings) and headings[i + 1].group(1) == "subsection"
+            lead_in = _LABEL_RE.sub("", masked[match.end() : end])
+            if has_subsections and not _has_enough_prose(lead_in):
+                pending = chunk
+            else:
+                chunks.append(chunk)
+            continue
+
+        lead_in_chunk, pending = pending, None
+        # A skipped section takes its subsections with it.
+        if parent_skipped:
+            continue
+        if _is_skipped(title):
+            # Dropping the subsection must not drop the section text in front of it.
+            if lead_in_chunk is not None:
+                chunks.append(lead_in_chunk)
+            continue
+        if parent is not None:
+            chunk.name = f"{parent}{SUBSECTION_SEPARATOR}{title}"
+        if lead_in_chunk is not None:
+            chunk.content = lead_in_chunk.content + chunk.content
+        chunks.append(chunk)
     return chunks
 
 
@@ -1011,19 +1102,24 @@ def run_final_referee(
     return response.text
 
 
-def _prepare(tex_path: str) -> tuple[str, list[Chunk], str]:
-    """Load a .tex file, split it into section chunks, and extract global context."""
+def _prepare(tex_path: str, split: SplitLevel) -> tuple[str, list[Chunk], str]:
+    """Load a .tex file, split it into chunks at *split*, and extract global context."""
     try:
         tex = load_tex(tex_path)
     except OSError as exc:
         raise ConfigurationError(f"Cannot read {tex_path}: {exc}") from exc
-    chunks = chunk_by_section(tex)
+    chunks = chunk_by_section(tex, split)
     if not chunks:
+        if split is SplitLevel.SECTION:
+            headings = "\\section{...}; a document using only \\chapter or \\subsection"
+            hint = " For a document organised by \\subsection, pass --split subsection."
+        else:
+            headings = "\\section{...} and \\subsection{...}; a document using only \\chapter"
+            hint = ""
         raise ConfigurationError(
             f"No reviewable sections found in {tex_path}. The pipeline splits on "
-            "\\section{...}; a document using only \\chapter or \\subsection, or one whose "
-            "sections all fall in the skip list (references, bibliography, "
-            "acknowledgments), leaves nothing to review."
+            f"{headings}, or one whose sections all fall in the skip list (references, "
+            f"bibliography, acknowledgments), leaves nothing to review.{hint}"
         )
     global_context = extract_global_context(tex)
     return tex, chunks, global_context
@@ -1062,7 +1158,12 @@ def prompts_digest(prompts: LoadedPrompts) -> str:
 
 
 def run_settings(prompts: LoadedPrompts, max_tokens: int, effort: str) -> dict:
-    """The knobs that change what a reviewer would say, recorded so resume can compare."""
+    """The knobs that change what a reviewer would say, recorded so resume can compare.
+
+    The split level is deliberately absent. It decides which chunks exist, not what a
+    reviewer says about one, and `chunk_key` already tracks that: switching it reviews
+    the new chunks and reuses every chunk that is the same at both levels.
+    """
     return {
         "models": {name: r.model.qualified for name, r in sorted(prompts.reviewers.items())},
         "max_tokens": max_tokens,
@@ -1335,12 +1436,13 @@ def run_pipeline(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
     assume_yes: bool = False,
+    split: SplitLevel = SplitLevel.SECTION,
 ) -> PipelineResult:
     """Run the full multi-reviewer pipeline on a .tex file and write all outputs to *output_dir*."""
     prompts = load_prompts() if prompts is None else prompts
 
     # Validate the input before creating anything, so a typo'd path leaves no litter.
-    tex, chunks, global_context = _prepare(tex_path)
+    tex, chunks, global_context = _prepare(tex_path, split)
     cache_key = prompt_cache_key(tex)
 
     output_dir = Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
@@ -1584,6 +1686,7 @@ def run_dry_run(
     prompts: LoadedPrompts | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
+    split: SplitLevel = SplitLevel.SECTION,
 ) -> None:
     """Count exact request inputs and optionally estimate cost, without generation."""
     prompts = load_prompts() if prompts is None else prompts
@@ -1596,7 +1699,7 @@ def run_dry_run(
         "exclude unpriced models and do not predict provider-specific cache hits.[/yellow]\n"
     )
 
-    tex, chunks, global_context = _prepare(tex_path)
+    tex, chunks, global_context = _prepare(tex_path, split)
     empty_known_issues = summarize_known_issues([])
     cache_key = prompt_cache_key(tex)
     token_totals: dict[ModelRef, int] = {}
