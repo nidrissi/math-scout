@@ -1025,7 +1025,9 @@ def _append_metadata_record(metadata_file: Path | None, record: dict, started: f
     try:
         line = json.dumps(record, ensure_ascii=False) + "\n"
         # O_NOFOLLOW refuses a symlink planted after the pre-flight check, atomically.
-        fd = os.open(metadata_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        # Windows lacks it, and is left with the pre-flight check alone.
+        nofollow = getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(metadata_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow, 0o644)
         with os.fdopen(fd, "a", encoding="utf-8") as log:
             log.write(line)
     except (OSError, TypeError, ValueError) as exc:

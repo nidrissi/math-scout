@@ -1037,6 +1037,22 @@ def test_unwritable_metadata_log_costs_a_warning_not_the_review(tmp_path, capsys
     assert victim.read_text() == "untouched"
 
 
+def test_metadata_log_is_written_where_o_nofollow_is_missing(tmp_path, monkeypatch):
+    monkeypatch.delattr("math_scout.reviewer.os.O_NOFOLLOW")  # as on Windows
+    path = tmp_path / "response_metadata.jsonl"
+
+    call_reviewer(
+        registry(FakeProvider()),
+        load_prompts().reviewers["FormalVerifier"],
+        Chunk("Intro", "body"),
+        "ctx",
+        "none",
+        metadata_file=path,
+    )
+
+    assert json.loads(path.read_text())["completed"]
+
+
 def test_metadata_log_failure_does_not_mask_a_retryable_error(tmp_path, monkeypatch):
     client = FakeProvider(ProviderConnectionError("transient"))
     monkeypatch.setattr("math_scout.reviewer.time.sleep", lambda _: setattr(client, "error", None))
