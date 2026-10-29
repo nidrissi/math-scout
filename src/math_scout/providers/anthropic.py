@@ -20,6 +20,7 @@ from .base import (
     ProviderConnectionError,
     ProviderEmptyOutputError,
     ProviderError,
+    ProviderMissingCredentialsError,
     ProviderModelError,
     ProviderPermissionError,
     ProviderRateLimitError,
@@ -89,10 +90,6 @@ class AnthropicProvider(Provider):
         if self._client_instance is None:
             try:
                 self._client_instance = anthropic.Anthropic()
-            except TypeError as exc:
-                # The Anthropic SDK uses a bare TypeError when neither an environment
-                # key nor an `ant auth login` profile can be resolved.
-                raise ProviderAuthenticationError(str(exc)) from exc
             except Exception as exc:  # credential resolution can fail during construction
                 raise self._normalize(exc) from exc
         return self._client_instance
@@ -138,6 +135,11 @@ class AnthropicProvider(Provider):
     def _normalize(self, exc: Exception) -> Exception:
         if isinstance(exc, ProviderError):
             return exc
+        if isinstance(exc, TypeError) and "Could not resolve authentication method" in str(exc):
+            # With neither an environment key nor an `ant auth login` profile, the SDK
+            # still constructs a client, then raises this bare TypeError while building
+            # the first request.
+            return ProviderMissingCredentialsError(str(exc))
         if isinstance(exc, anthropic.AuthenticationError):
             return ProviderAuthenticationError(str(exc))
         if isinstance(exc, anthropic.PermissionDeniedError):

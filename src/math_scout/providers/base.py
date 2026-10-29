@@ -178,6 +178,10 @@ class ProviderAuthenticationError(ProviderError):
     pass
 
 
+class ProviderMissingCredentialsError(ProviderAuthenticationError):
+    """No credential could be resolved at all, as opposed to one the API rejected."""
+
+
 class ProviderPermissionError(ProviderError):
     pass
 

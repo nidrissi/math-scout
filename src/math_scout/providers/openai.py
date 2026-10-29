@@ -20,6 +20,7 @@ from .base import (
     ProviderConnectionError,
     ProviderEmptyOutputError,
     ProviderError,
+    ProviderMissingCredentialsError,
     ProviderModelError,
     ProviderPermissionError,
     ProviderRateLimitError,
@@ -155,7 +156,7 @@ class OpenAIProvider(Provider):
             # Missing OPENAI_API_KEY is raised while constructing the client, before an
             # HTTP status exists. Other request errors have already matched above.
             if "api_key" in str(exc).lower():
-                return ProviderAuthenticationError(str(exc))
+                return ProviderMissingCredentialsError(str(exc))
             return ProviderRequestError(str(exc))
         return exc
 

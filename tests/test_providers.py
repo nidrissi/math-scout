@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 from types import SimpleNamespace
 from typing import cast
 
@@ -27,6 +28,7 @@ from math_scout.providers import (
     PromptBlock,
     ProviderAuthenticationError,
     ProviderEmptyOutputError,
+    ProviderMissingCredentialsError,
     ProviderRateLimitError,
     ProviderRefusalError,
     ProviderRegistry,
@@ -670,6 +672,40 @@ def test_anthropic_sdk_stream_reports_truncation_and_keeps_stream_metadata(stop_
         "cache_read_input_tokens": 3,
         "future_delta_usage": {"thinking": 5},
     }
+
+
+@pytest.fixture
+def no_credentials(monkeypatch, tmp_path):
+    """Hide every credential the SDKs could discover, in the environment or on disk."""
+    for name in list(os.environ):
+        if name.startswith(("ANTHROPIC_", "OPENAI_")):
+            monkeypatch.delenv(name)
+    # Stored `ant auth login` profiles live under the home or application-data directory.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+
+
+def test_anthropic_sdk_without_credentials_reports_them_missing(no_credentials):
+    def unreachable(_request):
+        raise AssertionError("no request should be sent without credentials")
+
+    client = anthropic.Anthropic(
+        http_client=httpx2.Client(transport=httpx2.MockTransport(unreachable)),
+        max_retries=0,
+    )
+    provider = AnthropicProvider(client)
+
+    # The SDK constructs the client anyway and raises a bare TypeError only once a
+    # request is built, which used to escape check_access as a traceback.
+    with pytest.raises(ProviderMissingCredentialsError):
+        provider.preflight("claude-opus-5-5")
+    with pytest.raises(ProviderMissingCredentialsError):
+        provider.generate(request("anthropic:claude-opus-5-5"))
+
+
+def test_openai_sdk_without_credentials_reports_them_missing(no_credentials):
+    with pytest.raises(ProviderMissingCredentialsError):
+        OpenAIProvider().preflight("gpt-6.1-sol")
 
 
 def test_anthropic_sdk_stream_rejects_complete_output_that_misses_the_schema():

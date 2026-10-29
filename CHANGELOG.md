@@ -37,6 +37,11 @@ protocol. Delete it, or pass a different `--output`.
   such, with its metadata, instead of as a missing completion event.
 - A directory or other non-regular file in place of a pipeline-managed output file is
   refused before any paid request, instead of failing at its first write mid-run.
+- Running without Anthropic credentials exits with code 2 and says how to provide them,
+  instead of crashing with a traceback ending in the SDK's `TypeError`. The SDK raises
+  it when the first request is built, not when the client is constructed, where the
+  adapter was looking for it. Missing credentials for either provider are no longer
+  described as a credential that was found and rejected.
 
 ## [0.5.0] — 2026-10-29
 

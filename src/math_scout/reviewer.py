@@ -27,6 +27,7 @@ from .providers import (
     Provider,
     ProviderAuthenticationError,
     ProviderConnectionError,
+    ProviderMissingCredentialsError,
     ProviderModelError,
     ProviderPermissionError,
     ProviderRateLimitError,
@@ -370,6 +371,8 @@ def check_access(providers: ProviderRegistry, models: list[ModelRef]) -> None:
                 retries=1,
                 base_delay=2.0,
             )
+        except ProviderMissingCredentialsError as exc:
+            raise ConfigurationError(provider.credentials_help) from exc
         except ProviderAuthenticationError as exc:
             raise ConfigurationError(
                 f"{provider.credentials_help} The credential that was found was rejected: {exc}"

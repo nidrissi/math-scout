@@ -20,6 +20,7 @@ from math_scout.providers import (
     Provider,
     ProviderAuthenticationError,
     ProviderConnectionError,
+    ProviderMissingCredentialsError,
     ProviderModelError,
     ProviderRateLimitError,
     ProviderRefusalError,
@@ -594,10 +595,13 @@ def test_check_access_routes_distinct_models_to_each_provider_without_generation
 
 
 def test_check_access_reports_missing_credentials():
-    # The SDK raises a bare TypeError when no credential can be resolved at all.
-    client = FakeProvider(ProviderAuthenticationError("Could not resolve authentication method."))
-    with pytest.raises(ConfigurationError, match="ANTHROPIC_API_KEY"):
+    client = FakeProvider(
+        ProviderMissingCredentialsError("Could not resolve authentication method.")
+    )
+    with pytest.raises(ConfigurationError, match="ANTHROPIC_API_KEY") as caught:
         check_access(registry(client), [ModelRef.parse("anthropic:strong")])
+    # Nothing was found, so nothing can have been rejected.
+    assert "rejected" not in str(caught.value)
 
 
 def test_check_access_reports_rejected_credentials():
