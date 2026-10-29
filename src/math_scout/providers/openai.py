@@ -27,6 +27,7 @@ from .base import (
     ProviderRequestError,
     ProviderServerError,
     ProviderTimeoutError,
+    native_response_metadata,
     next_lower_effort,
 )
 
@@ -260,9 +261,10 @@ class OpenAIProvider(Provider):
                 return stream.get_final_response()
 
         response = self._invoke(call)
+        metadata = native_response_metadata(response)
         refusal = self._refusal(response)
         if refusal is not None:
-            raise ProviderRefusalError(refusal)
+            raise ProviderRefusalError(refusal, response_metadata=metadata)
 
         status = getattr(response, "status", None)
         details = getattr(response, "incomplete_details", None)
@@ -273,19 +275,28 @@ class OpenAIProvider(Provider):
             reason = getattr(details, "reason", None) or "unknown reason"
             if reason == "content_filter":
                 raise ProviderRefusalError(
-                    "OpenAI stopped the response because of content filtering."
+                    "OpenAI stopped the response because of content filtering.",
+                    response_metadata=metadata,
                 )
-            raise ProviderRequestError(f"OpenAI response was incomplete: {reason}.")
+            raise ProviderRequestError(
+                f"OpenAI response was incomplete: {reason}.", response_metadata=metadata
+            )
         if status == "failed":
             error = getattr(response, "error", None)
-            raise ProviderRequestError(f"OpenAI response failed: {error or 'unknown error'}.")
+            raise ProviderRequestError(
+                f"OpenAI response failed: {error or 'unknown error'}.", response_metadata=metadata
+            )
 
         parsed = getattr(response, "output_parsed", None)
         text = getattr(response, "output_text", None) or None
         if not truncated and request.output_schema is not None and parsed is None:
-            raise ProviderEmptyOutputError("OpenAI returned no parsed structured output.")
+            raise ProviderEmptyOutputError(
+                "OpenAI returned no parsed structured output.", response_metadata=metadata
+            )
         if not truncated and request.output_schema is None and text is None:
-            raise ProviderEmptyOutputError("OpenAI returned no text output.")
+            raise ProviderEmptyOutputError(
+                "OpenAI returned no text output.", response_metadata=metadata
+            )
 
         usage = getattr(response, "usage", None)
         normalized_usage = None
@@ -303,6 +314,7 @@ class OpenAIProvider(Provider):
             completed=status == "completed",
             truncated=truncated,
             usage=normalized_usage,
+            response_metadata=metadata,
         )
 
     def count_tokens(self, request: GenerationRequest) -> int:

@@ -22,6 +22,7 @@ from math_scout.providers import (
     ProviderConnectionError,
     ProviderModelError,
     ProviderRateLimitError,
+    ProviderRefusalError,
     ProviderRegistry,
     ProviderServerError,
     provider_type,
@@ -540,6 +541,19 @@ class FakeOpenAIProvider(FakeProvider):
     credentials_help = "No usable OpenAI credentials. Export OPENAI_API_KEY."
 
 
+class MetadataProvider(FakeProvider):
+    def generate(self, request):
+        result = super().generate(request)
+        return replace(
+            result,
+            response_metadata={
+                "id": f"response_{len(self.parse_calls) + len(self.create_calls)}",
+                "usage": {"output_tokens_details": {"reasoning_tokens": 123}},
+                "native_field": {"preserved": True},
+            },
+        )
+
+
 def registry(*providers: Provider) -> ProviderRegistry:
     return ProviderRegistry({provider.name: provider for provider in providers})
 
@@ -927,6 +941,74 @@ def test_final_referee_retries_a_truncated_synthesis():
     assert report.startswith("# Summary")
     efforts = [call.effort for call in client.create_calls]
     assert efforts == ["high", "medium"]
+
+
+@pytest.mark.parametrize("final_referee", [False, True])
+def test_metadata_log_retains_both_truncation_attempts(tmp_path, final_referee):
+    client = MetadataProvider(truncate_first=1)
+    path = tmp_path / "response_metadata.jsonl"
+    if final_referee:
+        run_final_referee(
+            registry(client),
+            "paper",
+            [],
+            "ctx",
+            "referee",
+            ModelRef.parse("anthropic:strong"),
+            metadata_file=path,
+        )
+    else:
+        call_reviewer(
+            registry(client),
+            load_prompts().reviewers["FormalVerifier"],
+            Chunk("Intro", "body"),
+            "ctx",
+            "none",
+            metadata_file=path,
+        )
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [r["effort"] for r in records] == ["high", "medium"]
+    assert [r["truncated"] for r in records] == [True, False]
+    assert [r["completed"] for r in records] == [False, True]
+    assert [r["response"]["id"] for r in records] == ["response_1", "response_2"]
+    for record in records:
+        assert record["reviewer"] == ("FinalReferee" if final_referee else "FormalVerifier")
+        assert record["provider"] == "anthropic"
+        assert record["response"]["usage"]["output_tokens_details"]["reasoning_tokens"] == 123
+        assert record["elapsed_seconds"] >= 0
+        assert record["timestamp"].endswith("+00:00")
+    assert records[0]["chunk_key"] == records[1]["chunk_key"]
+
+
+def test_metadata_log_retains_failed_response_and_transient_attempt(tmp_path, monkeypatch):
+    path = tmp_path / "response_metadata.jsonl"
+    native_metadata = {"id": "refused", "usage": {"input_tokens": 10}}
+    client = FakeProvider(ProviderRefusalError("refused", response_metadata=native_metadata))
+    kwargs = dict(
+        providers=registry(client),
+        reviewer=load_prompts().reviewers["FormalVerifier"],
+        chunk=Chunk("Intro", "body"),
+        global_context="ctx",
+        known_issues="none",
+        metadata_file=path,
+    )
+    with pytest.raises(ProviderRefusalError):
+        call_reviewer(**kwargs)
+    failed = json.loads(path.read_text())
+    assert failed["response"] == native_metadata
+    assert failed["error_type"] == "ProviderRefusalError"
+
+    # Retry a transport failure without losing its record or duplicating earlier ones.
+    client.error = ProviderConnectionError("not copied into debug output")
+    monkeypatch.setattr("math_scout.reviewer.time.sleep", lambda _: setattr(client, "error", None))
+    call_reviewer(**kwargs)
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(records) == 3
+    assert records[0] == failed
+    assert records[1]["error_type"] == "ProviderConnectionError"
+    assert records[1]["response"] is None
+    assert records[2]["completed"]
+    assert "not copied into debug output" not in path.read_text()
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
@@ -1318,6 +1400,48 @@ def test_the_whole_paper_pass_runs_once_and_survives_a_resume(tmp_path):
     client, again = review(tmp_path, sections(*THREE))
     assert client.parse_calls == []
     assert sum(i.location == WHOLE_PAPER_NAME for i in again.issues) == PAPER_CALLS
+
+
+def test_pipeline_metadata_covers_all_passes_and_appends_on_resume(tmp_path):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(*THREE))
+    output = tmp_path / "out"
+    client = MetadataProvider()
+    run_pipeline(registry(client), str(source), output, assume_yes=True)
+    path = output / "response_metadata.jsonl"
+    first = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(first) == THREE_CALLS + 1
+    assert Counter(r["reviewer"] for r in first) == {
+        "FormalVerifier": 3,
+        "AdversarialSkeptic": 3,
+        "ExpositionReferee": 3,
+        "NotationAuditor": 1,
+        "ClaimAuditor": 1,
+        "FinalReferee": 1,
+    }
+    assert all(r["response"]["native_field"] == {"preserved": True} for r in first)
+    second_client = MetadataProvider()
+    run_pipeline(registry(second_client), str(source), output, assume_yes=True)
+    second = [json.loads(line) for line in path.read_text().splitlines()]
+    assert second[:-1] == first
+    assert second[-1]["reviewer"] == "FinalReferee"
+    assert second_client.parse_calls == []
+
+
+def test_pipeline_refuses_metadata_log_symlink_before_generation(tmp_path):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(*THREE))
+    output = tmp_path / "out"
+    output.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    (output / "response_metadata.jsonl").symlink_to(victim)
+    client = MetadataProvider()
+    with pytest.raises(ConfigurationError, match="symbolic link"):
+        run_pipeline(registry(client), str(source), output, assume_yes=True)
+    assert victim.read_text() == "untouched"
+    assert client.parse_calls == []
+    assert client.create_calls == []
 
 
 def test_resume_reviews_only_the_new_chunk_when_one_is_inserted(tmp_path):

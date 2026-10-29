@@ -26,6 +26,7 @@ from .base import (
     ProviderRequestError,
     ProviderServerError,
     ProviderTimeoutError,
+    native_response_metadata,
 )
 
 _ALL_EFFORTS = frozenset(EFFORT_LEVELS)
@@ -213,9 +214,10 @@ class AnthropicProvider(Provider):
                 return stream.get_final_message()
 
         response = self._invoke(call)
+        metadata = native_response_metadata(response)
         stop_reason = getattr(response, "stop_reason", None)
         if stop_reason == "refusal":
-            raise ProviderRefusalError("Anthropic refused the request.")
+            raise ProviderRefusalError("Anthropic refused the request.", response_metadata=metadata)
         truncated = stop_reason == "max_tokens"
         parsed = getattr(response, "parsed_output", None)
         texts = [
@@ -225,9 +227,13 @@ class AnthropicProvider(Provider):
         ]
         text = "".join(texts) or None
         if not truncated and request.output_schema is not None and parsed is None:
-            raise ProviderEmptyOutputError("Anthropic returned no parsed structured output.")
+            raise ProviderEmptyOutputError(
+                "Anthropic returned no parsed structured output.", response_metadata=metadata
+            )
         if not truncated and request.output_schema is None and text is None:
-            raise ProviderEmptyOutputError("Anthropic returned no text output.")
+            raise ProviderEmptyOutputError(
+                "Anthropic returned no text output.", response_metadata=metadata
+            )
         usage = getattr(response, "usage", None)
         normalized_usage = None
         if usage is not None:
@@ -243,6 +249,7 @@ class AnthropicProvider(Provider):
             completed=not truncated,
             truncated=truncated,
             usage=normalized_usage,
+            response_metadata=metadata,
         )
 
     def count_tokens(self, request: GenerationRequest) -> int:

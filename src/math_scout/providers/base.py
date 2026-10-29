@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -86,6 +86,18 @@ class GenerationResult:
     completed: bool = True
     truncated: bool = False
     usage: GenerationUsage | None = None
+    response_metadata: dict[str, Any] | None = None
+
+
+def native_response_metadata(response: BaseModel) -> dict[str, Any]:
+    """Keep native response fields, including future usage details, without content."""
+    metadata = response.model_dump(
+        mode="json", exclude={"output", "content", "parsed_output", "output_parsed"}
+    )
+    request_id = getattr(response, "_request_id", None)
+    if request_id is not None:
+        metadata["request_id"] = request_id
+    return metadata
 
 
 @dataclass(frozen=True)
@@ -144,6 +156,10 @@ class Pricing:
 
 class ProviderError(Exception):
     """Base class for errors normalized across native provider SDKs."""
+
+    def __init__(self, message: str, *, response_metadata: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.response_metadata = response_metadata
 
 
 class ProviderAuthenticationError(ProviderError):

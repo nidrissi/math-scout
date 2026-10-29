@@ -321,10 +321,26 @@ Everything lands in the output directory (default `<input_dir>/review/`):
 | `reviews/NNN_<section>_<reviewer>.json` | Raw JSON from each reviewer per chunk |
 | `all_issues.json` | Every issue behind the current report, as a JSON array |
 | `issues.jsonl` | Append-only log of every issue ever produced here, one per line |
+| `response_metadata.jsonl` | Append-only debugging log of generation attempts and native response metadata |
 | `state.json` | Resume bookkeeping — which reviews are complete, and under what settings |
 
 `all_issues.json` is the authoritative set for the current report. `issues.jsonl` is a
 log: if you edit the paper and re-run, it keeps the superseded findings too.
+
+`response_metadata.jsonl` records section reviewers, whole-paper reviewers, and final
+synthesis, including truncation retries at their actual effort. Each entry identifies
+the reviewer, section and chunk hash, requested model and settings, timestamp, and elapsed
+time. Its `response` object preserves the provider's native response fields, including
+IDs, status or stop reason, complete nested usage (such as OpenAI reasoning-token counts
+and Anthropic cache details), and additional fields returned by the SDK. These fields
+are not normalized across providers; unavailable counts are not inferred. Generated
+content and SDK-parsed findings are excluded from this metadata object.
+
+Failed attempts include an error type and any available final-response metadata; after
+a transport or SDK parsing failure, `response` is `null`. Retries hidden inside the SDK
+are not separate entries. Resume appends new attempts without duplicating reused reviews
+or backfilling metadata for older runs. The log is for debugging, not resume bookkeeping
+or the source of findings.
 
 The numbered prefix is the chunk's position in the document, so both directories sort in
 reading order. A re-run keeps that true: reviews it reuses are renamed into their new

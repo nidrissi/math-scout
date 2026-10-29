@@ -21,6 +21,7 @@ Outputs land in `<input_dir>/review/` by default (override with `--output`):
 - `review/state.json` — resume bookkeeping: completed reviews keyed by chunk hash, plus the settings that produced them
 - `review/all_issues.json` — the issues behind the current report, rebuilt from `reviews/` each run
 - `review/issues.jsonl` — append-only log of every issue ever produced here; may contain superseded entries
+- `review/response_metadata.jsonl` — append-only debugging log of generation attempts, with native provider response metadata, complete usage details, and actual retry effort; not used for resume or findings
 - `review/final_report.md` — final synthesis in markdown
 
 Use `--dry-run` to count tokens and estimate cost without sending generation requests, and `--yes` to skip the confirmation prompt in non-interactive contexts. `--split subsection` cuts the section passes at each `\subsection` instead of each `\section`.
@@ -87,6 +88,7 @@ The final referee (`prompts/final_referee.md`) receives global context + all iss
 - **No pass may assert prior art.** Nothing here can read a reference, so a claim that a result is already known would be a fabrication. The protocol, `claim_auditor.md` and `final_referee.md` each forbid it independently; keep all three.
 - **Errors that would recur identically** (`FATAL_PROVIDER_ERRORS`) stop the run; everything else is recorded as a per-reviewer failure and the run continues.
 - **Every generation call streams** through its provider's native SDK. Anthropic finalizes a `ParsedMessage` with `get_final_message()`; OpenAI finalizes its response with `get_final_response()`. Structured output and usage are normalized behind `GenerationResult`. `MAX_OUTPUT_TOKENS` (64000) is only a CLI typo guard; model-specific output limits live in the provider capability tables, which are checked before a run.
+- **Keep native response metadata for debugging.** `GenerationResult.response_metadata` and response-related `ProviderError`s retain all native top-level fields except generated content and parsed findings. Preserve nested usage and unknown SDK fields instead of mapping a fixed subset. `response_metadata.jsonl` logs each application-level generation attempt, including truncations and final synthesis; reused reviews do not create duplicate entries. Protect this log with the same output-path checks as other managed files.
 - **`max_tokens` is headroom, not a budget to spend.** Thinking and the response share it, and a call cut off mid-JSON is billed in full and yields nothing — so a cap set too low *causes* cost rather than limiting it. `DEFAULT_MAX_TOKENS` is 32000 for that reason. When a reviewer truncates anyway, `call_reviewer` retries once at one `--effort` level down (`lower_effort`) and `run_final_referee` does the same; a second truncation is a real failure. Note that a retried review was produced at lower effort than `state.json` records for the run.
 - **Tests must not need the network or credentials.** Stub the client, as `FakeClient` does.
 

@@ -11,8 +11,10 @@ import httpx2
 import openai
 import pytest
 from anthropic.resources.messages import Messages
+from anthropic.types import ParsedMessage
 from openai.resources.responses.input_tokens import InputTokens
 from openai.resources.responses.responses import Responses
+from openai.types.responses import ParsedResponse
 
 from math_scout.providers import (
     AnthropicProvider,
@@ -137,32 +139,69 @@ def openai_provider(client: FakeOpenAIClient) -> OpenAIProvider:
 
 
 def anthropic_response(*, parsed=None, text=None, stop_reason="end_turn"):
-    content = [] if text is None else [SimpleNamespace(type="text", text=text)]
-    return SimpleNamespace(
-        parsed_output=parsed,
+    content = []
+    if text is not None or parsed is not None:
+        content = [
+            {"type": "text", "text": text or parsed.model_dump_json(), "parsed_output": parsed}
+        ]
+    return ParsedMessage[Review](
+        id="msg_test",
+        model="claude-opus-5-5",
+        role="assistant",
+        type="message",
         content=content,
         stop_reason=stop_reason,
-        usage=SimpleNamespace(
+        usage=dict(
             input_tokens=10,
             output_tokens=20,
             cache_read_input_tokens=3,
             cache_creation_input_tokens=4,
+            cache_creation={"ephemeral_5m_input_tokens": 4, "ephemeral_1h_input_tokens": 0},
+            future_token_details={"thinking": 12},
         ),
+        future_response_field={"native": True},
     )
 
 
 def openai_response(*, parsed=None, text=None, status="completed", reason=None, output=None):
-    return SimpleNamespace(
-        output_parsed=parsed,
-        output_text=text,
+    if output is None:
+        output = []
+        if text is not None or parsed is not None:
+            output = [
+                dict(
+                    id="msg_test",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[
+                        dict(
+                            type="output_text",
+                            text=text or parsed.model_dump_json(),
+                            annotations=[],
+                            parsed=parsed,
+                        )
+                    ],
+                )
+            ]
+    return ParsedResponse(
+        id="resp_test",
+        created_at=123.0,
+        model="gpt-6.1-sol",
+        object="response",
+        parallel_tool_calls=True,
+        tool_choice="auto",
+        tools=[],
         status=status,
-        incomplete_details=None if reason is None else SimpleNamespace(reason=reason),
-        output=[] if output is None else output,
-        usage=SimpleNamespace(
+        incomplete_details=None if reason is None else {"reason": reason},
+        output=output,
+        usage=dict(
             input_tokens=11,
             output_tokens=22,
-            input_tokens_details=SimpleNamespace(cached_tokens=5, cache_write_tokens=6),
+            total_tokens=33,
+            input_tokens_details={"cached_tokens": 5, "cache_write_tokens": 6},
+            output_tokens_details={"reasoning_tokens": 17, "future_detail": 9},
         ),
+        future_response_field={"native": True},
     )
 
 
@@ -451,7 +490,13 @@ def test_openai_text_truncation_refusal_empty_output_and_usage_are_normalized():
     ).generate(request("openai:gpt-5.6-sol", schema=False))
     assert truncated.truncated is True
 
-    refusal = SimpleNamespace(content=[SimpleNamespace(type="refusal", refusal="cannot comply")])
+    refusal = dict(
+        id="msg_refused",
+        type="message",
+        role="assistant",
+        status="completed",
+        content=[{"type": "refusal", "refusal": "cannot comply"}],
+    )
     with pytest.raises(ProviderRefusalError, match="cannot comply"):
         openai_provider(FakeOpenAIClient(openai_response(output=[refusal]))).generate(
             request("openai:gpt-5.6-sol", schema=False)
@@ -478,3 +523,53 @@ def test_openai_native_rate_limit_is_normalized():
 
     with pytest.raises(ProviderRateLimitError):
         provider.generate(request("openai:gpt-5.6-sol"))
+
+
+@pytest.mark.parametrize("provider_name", ["openai", "anthropic"])
+def test_native_response_metadata_keeps_nested_usage_and_unknown_fields(provider_name):
+    if provider_name == "openai":
+        response = openai_response(parsed=Review(issues=[]))
+        provider = openai_provider(FakeOpenAIClient(response))
+        model = "openai:gpt-6.1-sol"
+    else:
+        response = anthropic_response(parsed=Review(issues=[]))
+        provider = anthropic_provider(FakeAnthropicClient(response))
+        model = "anthropic:claude-opus-5-5"
+    response._request_id = "request_test"
+
+    result = provider.generate(request(model))
+    metadata = result.response_metadata
+    assert metadata["usage"] == response.usage.model_dump(mode="json")
+    assert metadata["future_response_field"] == {"native": True}
+    assert metadata["id"] == response.id
+    assert metadata["model"] == response.model
+    assert metadata["request_id"] == "request_test"
+    assert "content" not in metadata
+    assert "output" not in metadata
+    assert "parsed_output" not in metadata
+    if provider_name == "openai":
+        assert metadata["usage"]["output_tokens_details"]["reasoning_tokens"] == 17
+        assert metadata["usage"]["output_tokens_details"]["future_detail"] == 9
+    else:
+        assert metadata["usage"]["cache_creation"]["ephemeral_5m_input_tokens"] == 4
+        assert metadata["usage"]["future_token_details"] == {"thinking": 12}
+
+
+@pytest.mark.parametrize("provider_name", ["openai", "anthropic"])
+def test_failed_and_truncated_responses_retain_native_metadata(provider_name):
+    if provider_name == "openai":
+        truncated = openai_response(status="incomplete", reason="max_output_tokens")
+        failed = openai_response(status="incomplete", reason="content_filter")
+        build, client_type = openai_provider, FakeOpenAIClient
+        model = "openai:gpt-6.1-sol"
+    else:
+        truncated = anthropic_response(stop_reason="max_tokens")
+        failed = anthropic_response(stop_reason="refusal")
+        build, client_type = anthropic_provider, FakeAnthropicClient
+        model = "anthropic:claude-opus-5-5"
+    result = build(client_type(truncated)).generate(request(model))
+    assert result.truncated
+    assert result.response_metadata["usage"] == truncated.usage.model_dump(mode="json")
+    with pytest.raises(ProviderRefusalError) as caught:
+        build(client_type(failed)).generate(request(model))
+    assert caught.value.response_metadata["usage"] == failed.usage.model_dump(mode="json")

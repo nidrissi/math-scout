@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from textwrap import indent
@@ -22,6 +23,7 @@ from .providers import (
     GenerationResult,
     ModelRef,
     PromptBlock,
+    Provider,
     ProviderAuthenticationError,
     ProviderConnectionError,
     ProviderModelError,
@@ -71,6 +73,7 @@ REVIEW_PROTOCOL_PROMPT = "review_protocol.md"
 # Resume bookkeeping, written alongside the reviews.
 STATE_FILE = "state.json"
 STATE_VERSION = 1
+RESPONSE_METADATA_FILE = "response_metadata.jsonl"
 
 # Suffix a review file wears while it is being renamed into a new position. Anything
 # still carrying it is the debris of an interrupted rename and gets swept.
@@ -968,6 +971,53 @@ def prompt_cache_key(tex: str) -> str:
     return f"math-scout:{digest}"
 
 
+def _generate_with_metadata(
+    provider: Provider,
+    request: GenerationRequest,
+    metadata_file: Path | None,
+    reviewer_name: str,
+    chunk: Chunk,
+) -> GenerationResult:
+    """Record each attempt before parsing/retry decisions discard response details."""
+    started = time.monotonic()
+    record = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "reviewer": reviewer_name,
+        "section": chunk.name,
+        "chunk_key": chunk_key(chunk),
+        "provider": request.model.provider,
+        "model": request.model.model,
+        "effort": request.effort,
+        "reasoning": request.reasoning,
+        "max_tokens": request.output_limit,
+    }
+    try:
+        response = provider.generate(request)
+        record.update(
+            completed=response.completed,
+            truncated=response.truncated,
+            response=response.response_metadata,
+        )
+        return response
+    except Exception as exc:
+        # No final response is available after a transport or SDK parsing failure.
+        # Record the error type, not an exception string that might contain credentials.
+        record.update(
+            error_type=type(exc).__name__,
+            response=getattr(exc, "response_metadata", None),
+        )
+        raise
+    finally:
+        if metadata_file is not None:
+            record["elapsed_seconds"] = time.monotonic() - started
+            if metadata_file.is_symlink():
+                raise ConfigurationError(
+                    f"Refusing to use symbolic link in pipeline-managed output: {metadata_file}"
+                )
+            with metadata_file.open("a", encoding="utf-8") as log:
+                log.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def call_reviewer(
     providers: ProviderRegistry,
     reviewer: ReviewerConfig,
@@ -978,6 +1028,7 @@ def call_reviewer(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
     cache_key: str | None = None,
+    metadata_file: Path | None = None,
 ):
     """Send a chunk to a reviewer and return its parsed JSON issue report.
 
@@ -1004,7 +1055,9 @@ def call_reviewer(
             review_protocol=review_protocol,
             prompt_cache_key=cache_key,
         )
-        return request, _call_with_retry(lambda: provider.generate(request))
+        return request, _call_with_retry(
+            lambda: _generate_with_metadata(provider, request, metadata_file, reviewer.name, chunk)
+        )
 
     request, response = attempt(effort)
 
@@ -1056,6 +1109,7 @@ def run_final_referee(
     effort: str = DEFAULT_EFFORT,
     coverage_note: str = "",
     cache_key: str | None = None,
+    metadata_file: Path | None = None,
 ) -> str:
     """Synthesize a markdown referee report from the paper and the collected issues."""
 
@@ -1078,7 +1132,11 @@ def run_final_referee(
             preamble=coverage_note,
             prompt_cache_key=cache_key,
         )
-        return request, _call_with_retry(lambda: provider.generate(request))
+        return request, _call_with_retry(
+            lambda: _generate_with_metadata(
+                provider, request, metadata_file, "FinalReferee", Chunk(WHOLE_PAPER_NAME, tex)
+            )
+        )
 
     request, response = attempt(effort)
 
@@ -1247,6 +1305,7 @@ def _validate_managed_output_tree(output_dir: Path) -> None:
     managed_files = (
         output_dir / STATE_FILE,
         output_dir / "issues.jsonl",
+        output_dir / RESPONSE_METADATA_FILE,
         output_dir / "all_issues.json",
         output_dir / "final_report.md",
     )
@@ -1448,6 +1507,7 @@ def run_pipeline(
     output_dir = Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
     reviews_dir = output_dir / "reviews"
     issues_file = output_dir / "issues.jsonl"
+    metadata_file = output_dir / RESPONSE_METADATA_FILE
     chunks_dir = output_dir / "chunks"
 
     section_reviewers = prompts.scoped(ReviewerScope.SECTION)
@@ -1566,6 +1626,7 @@ def run_pipeline(
                     max_tokens=max_tokens,
                     effort=effort,
                     cache_key=cache_key,
+                    metadata_file=metadata_file,
                 )
             except FATAL_PROVIDER_ERRORS as exc:
                 # Credentials or the model itself are wrong, so every remaining call
@@ -1647,6 +1708,7 @@ def run_pipeline(
             effort=effort,
             coverage_note=format_coverage_note(result.failures),
             cache_key=cache_key,
+            metadata_file=metadata_file,
         )
     except FATAL_PROVIDER_ERRORS as exc:
         result.fatal_error = (
