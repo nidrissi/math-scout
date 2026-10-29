@@ -14,6 +14,8 @@ All notable changes to this project are documented here. The format is based on
   truncated Anthropic review, surfaced as an SDK error before the adapter could see it
   was a truncation. A content-filtered or failed OpenAI response is likewise reported as
   such, with its metadata, instead of as a missing completion event.
+- A directory or other non-regular file in place of a pipeline-managed output file is
+  refused before any paid request, instead of failing at its first write mid-run.
 
 ## [0.5.0] — 2026-10-29
 

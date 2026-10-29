@@ -1505,6 +1505,19 @@ def test_pipeline_refuses_metadata_log_symlink_before_generation(tmp_path):
     assert client.create_calls == []
 
 
+@pytest.mark.parametrize("name", ["response_metadata.jsonl", "issues.jsonl", "state.json"])
+def test_pipeline_refuses_a_directory_in_place_of_a_managed_file_before_generation(tmp_path, name):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(*THREE))
+    output = tmp_path / "out"
+    (output / name).mkdir(parents=True)
+    client = FakeProvider()
+    with pytest.raises(ConfigurationError, match="not a regular file"):
+        run_pipeline(registry(client), str(source), output, assume_yes=True)
+    assert client.parse_calls == []
+    assert client.create_calls == []
+
+
 def test_resume_reviews_only_the_new_chunk_when_one_is_inserted(tmp_path):
     """The regression this replaced: a shifted index re-ran everything and, because
     issues.jsonl is append-only, reported every prior issue twice."""

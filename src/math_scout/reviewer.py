@@ -1336,6 +1336,12 @@ def _validate_managed_output_tree(output_dir: Path) -> None:
                 f"Pipeline-managed output path is not a directory: {directory}"
             )
 
+    # Otherwise a directory or FIFO in a file's place fails its first write, after paid
+    # generations have already been made.
+    for path in managed_files:
+        if path.exists() and not path.is_file():
+            raise ConfigurationError(f"Pipeline-managed output path is not a regular file: {path}")
+
     for directory in managed_dirs[1:]:
         if not directory.is_dir():
             continue
