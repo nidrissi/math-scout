@@ -339,10 +339,12 @@ unavailable counts are not inferred. Generated content and parsed findings are e
 from this metadata object.
 
 Failed attempts include an error type and any available final-response metadata; after
-a transport or SDK parsing failure, `response` is `null`. Retries hidden inside the SDK
+a transport or SDK parsing failure, `response` is `null`. An attempt interrupted with
+Ctrl-C is recorded with `error_type` `KeyboardInterrupt`. Retries hidden inside the SDK
 are not separate entries. Resume appends new attempts without duplicating reused reviews
 or backfilling metadata for older runs. The log is for debugging, not resume bookkeeping
-or the source of findings.
+or the source of findings: if an entry cannot be written, the run prints a warning and
+keeps the review it describes.
 
 The numbered prefix is the chunk's position in the document, so both directories sort in
 reading order. A re-run keeps that true: reviews it reuses are renamed into their new

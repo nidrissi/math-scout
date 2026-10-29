@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -993,29 +994,42 @@ def _generate_with_metadata(
     }
     try:
         response = provider.generate(request)
-        record.update(
-            completed=response.completed,
-            truncated=response.truncated,
-            response=response.response_metadata,
-        )
-        return response
-    except Exception as exc:
+    except BaseException as exc:
         # No final response is available after a transport or SDK parsing failure.
         # Record the error type, not an exception string that might contain credentials.
+        # BaseException, so an interrupted attempt says so instead of logging a bare record.
         record.update(
             error_type=type(exc).__name__,
             response=getattr(exc, "response_metadata", None),
         )
+        _append_metadata_record(metadata_file, record, started)
         raise
-    finally:
-        if metadata_file is not None:
-            record["elapsed_seconds"] = time.monotonic() - started
-            if metadata_file.is_symlink():
-                raise ConfigurationError(
-                    f"Refusing to use symbolic link in pipeline-managed output: {metadata_file}"
-                )
-            with metadata_file.open("a", encoding="utf-8") as log:
-                log.write(json.dumps(record, ensure_ascii=False) + "\n")
+    record.update(
+        completed=response.completed,
+        truncated=response.truncated,
+        response=response.response_metadata,
+    )
+    _append_metadata_record(metadata_file, record, started)
+    return response
+
+
+def _append_metadata_record(metadata_file: Path | None, record: dict, started: float) -> None:
+    """Append one attempt to the debugging log, never at the cost of the attempt itself.
+
+    By the time this runs the generation is paid for. A log that cannot be written is
+    worth a warning, not the review it describes or the error a retry decision needs.
+    """
+    if metadata_file is None:
+        return
+    record["elapsed_seconds"] = time.monotonic() - started
+    try:
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        # O_NOFOLLOW refuses a symlink planted after the pre-flight check, atomically.
+        fd = os.open(metadata_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "a", encoding="utf-8") as log:
+            log.write(line)
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"[yellow]Could not append to {metadata_file}: {exc}[/yellow]")
 
 
 def call_reviewer(

@@ -1011,6 +1011,67 @@ def test_metadata_log_retains_failed_response_and_transient_attempt(tmp_path, mo
     assert "not copied into debug output" not in path.read_text()
 
 
+@pytest.mark.parametrize("obstacle", ["directory", "symlink"])
+def test_unwritable_metadata_log_costs_a_warning_not_the_review(tmp_path, capsys, obstacle):
+    path = tmp_path / "response_metadata.jsonl"
+    victim = tmp_path / "victim"
+    victim.write_text("untouched")
+    if obstacle == "directory":
+        path.mkdir()
+    else:
+        path.symlink_to(victim)  # planted after the pipeline's pre-flight check
+    client = FakeProvider(issues_per_call=1)
+
+    review = call_reviewer(
+        registry(client),
+        load_prompts().reviewers["FormalVerifier"],
+        Chunk("Intro", "body"),
+        "ctx",
+        "none",
+        metadata_file=path,
+    )
+
+    assert len(review.issues) == 1
+    assert len(client.parse_calls) == 1
+    assert "Could not append" in capsys.readouterr().out
+    assert victim.read_text() == "untouched"
+
+
+def test_metadata_log_failure_does_not_mask_a_retryable_error(tmp_path, monkeypatch):
+    client = FakeProvider(ProviderConnectionError("transient"))
+    monkeypatch.setattr("math_scout.reviewer.time.sleep", lambda _: setattr(client, "error", None))
+    path = tmp_path / "response_metadata.jsonl"
+    path.mkdir()
+
+    call_reviewer(
+        registry(client),
+        load_prompts().reviewers["FormalVerifier"],
+        Chunk("Intro", "body"),
+        "ctx",
+        "none",
+        metadata_file=path,
+    )
+
+    assert len(client.parse_calls) == 2
+
+
+def test_metadata_log_records_an_interrupted_attempt(tmp_path):
+    path = tmp_path / "response_metadata.jsonl"
+    client = FakeProvider(KeyboardInterrupt())
+    with pytest.raises(KeyboardInterrupt):
+        call_reviewer(
+            registry(client),
+            load_prompts().reviewers["FormalVerifier"],
+            Chunk("Intro", "body"),
+            "ctx",
+            "none",
+            metadata_file=path,
+        )
+    record = json.loads(path.read_text())
+    assert record["error_type"] == "KeyboardInterrupt"
+    assert record["response"] is None
+
+
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
 def test_lower_effort_walks_down_the_scale_and_stops(effort):
     below = lower_effort(effort)
