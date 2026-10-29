@@ -7,6 +7,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- `response_metadata.jsonl`, an append-only debugging log of every generation attempt:
+  section and whole-paper reviews, the final synthesis, and truncation retries at the
+  effort they actually ran at. Each entry keeps the provider's native response metadata,
+  without generated content: response and request IDs, status or stop reason, and
+  complete usage including reasoning-token and cache details. It plays no part in resume
+  or findings, and an entry that cannot be written costs a warning, not the review.
+
 ### Fixed
 
 - A reviewer or final referee cut off by `--max-tokens` is retried one effort level down,
