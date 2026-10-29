@@ -170,8 +170,8 @@ math-scout paper.tex --preset astra-sol-luna  # Astra final, Sol strong, Luna fa
 math-scout paper.tex --preset sol-luna        # OpenAI Sol for strong, Luna for fast
 math-scout paper.tex --preset opus-sonnet     # Anthropic Opus for strong, Sonnet for fast
 math-scout paper.tex \
-  --strong-model openai:gpt-5.6-sol \
-  --fast-model anthropic:claude-sonnet-5 \
+  --strong-model openai:gpt-6.1-sol \
+  --fast-model anthropic:claude-sonnet-5-5 \
   --final-model openai:gpt-6-astra               # independent synthesis model
 ```
 
@@ -203,10 +203,9 @@ warning rather than aborting the run.
 
 ### Choosing providers, models, and effort
 
-Defaults are `anthropic:claude-opus-5` for the strong tier and
-`anthropic:claude-sonnet-5` for the fast tier, so the command without model flags keeps
-using the same Anthropic models; final synthesis follows the resolved strong model unless
-`--final-model` or a preset selects one independently. Every explicit model must use
+Defaults are `anthropic:claude-opus-5-5` for the strong tier and
+`anthropic:claude-sonnet-5-5` for the fast tier. Final synthesis follows the resolved strong
+model unless `--final-model` or a preset selects one independently. Every explicit model must use
 `provider:model`; bare IDs are rejected. Use a preset to keep common combinations concise:
 
 ```bash
@@ -217,21 +216,32 @@ math-scout paper.tex \
   --strong-model anthropic:claude-opus-4-7 \
   --fast-model anthropic:claude-sonnet-4-6
 math-scout paper.tex \
-  --strong-model openai:gpt-5.6-sol \
-  --fast-model anthropic:claude-sonnet-5
+  --strong-model openai:gpt-6.1-sol \
+  --fast-model anthropic:claude-sonnet-5-5
 ```
 
 The legacy presets set both tiers together: `opus-sonnet` resolves to
-`anthropic:claude-opus-5` and `anthropic:claude-sonnet-5`, while `sol-luna` resolves to
-`openai:gpt-5.6-sol` and `openai:gpt-5.6-luna`; their final referee follows the effective
+`anthropic:claude-opus-5-5` and `anthropic:claude-sonnet-5-5`, while `sol-luna` resolves to
+`openai:gpt-6.1-sol` and `openai:gpt-6-luna`; their final referee follows the effective
 strong model, including when `--strong-model` overrides the preset. `astra-sol-luna`
-uses `openai:gpt-6-astra` for final synthesis, `openai:gpt-5.6-sol` for the strong tier,
-and `openai:gpt-5.6-luna` for the fast tier. Each explicit flag replaces its corresponding
+uses `openai:gpt-6-astra` for final synthesis, `openai:gpt-6.1-sol` for the strong tier,
+and `openai:gpt-6-luna` for the fast tier. Each explicit flag replaces its corresponding
 preset selection; for the legacy presets, the final model continues to follow the
 resolved strong model. For example,
-`--preset sol-luna --fast-model anthropic:claude-sonnet-5` is a concise mixed-provider
+`--preset sol-luna --fast-model anthropic:claude-sonnet-5-5` is a concise mixed-provider
 configuration. State records the resolved qualified model IDs, not the preset name, so a
 preset command and its fully explicit equivalent can resume the same run.
+
+Other current options include `openai:gpt-6.1-terra`, `anthropic:claude-haiku-5-5`,
+and `anthropic:claude-fable-5-1`. Capability and pricing metadata follow the official
+[OpenAI model catalog](https://developers.openai.com/api/docs/models) and
+[Claude model catalog](https://platform.claude.com/docs/en/models/overview).
+Older registered models remain available through explicit flags.
+
+**The updated defaults and presets change the resolved reviewer models.** To resume a
+review made with an earlier release, pass its original `--strong-model` and `--fast-model`
+explicitly; otherwise use a new `--output` directory. The usual settings guard prevents
+mixing findings from different models.
 
 **Existing output directories whose `state.json` contains bare Anthropic model IDs are
 not reusable. Delete the output directory or pass a different `--output`; they are
@@ -245,9 +255,11 @@ from resumable reviewer settings. There are no per-reviewer model flags.
 Capability validation is provider-specific. Known incompatible combinations are refused
 before spending. Reasoning reviewers receive the selected effort. For an OpenAI reviewer
 that does not reason, the adapter requests `none` where the model supports it, or omits
-the reasoning field for known non-reasoning models. Astra requires reasoning, so it cannot
-serve the fast tier: `ExpositionReferee` deliberately disables reasoning. Select Astra
-with `--final-model` (or `astra-sol-luna`) instead.
+the reasoning field for known non-reasoning models. GPT-6 Astra, GPT-6.1 Sol, Claude
+Opus 5.5, and Claude Fable 5.1 require reasoning, so they cannot serve the fast tier:
+`ExpositionReferee` runs without up-front thinking. They work as strong or final models.
+On Claude Sonnet 5.5, the adapter uses `between_tools` for this reviewer; without tools,
+that mode returns text only.
 
 `--effort` is the main cost and latency lever — it controls how much the models reason and
 spend overall. `high` is the default; drop to `medium` or `low` on a long paper or a quick
@@ -261,10 +273,10 @@ Two constraints are worth knowing:
   than limiting it. Lower it to save money and you will generally spend more. The default
   of 32000 leaves room for a deep reviewer to think its way through a long section; if you
   see truncation warnings, raise it rather than lowering it.
-- Some Anthropic models reject a disabled-thinking request at `xhigh` or `max` effort.
-  This can't happen with the defaults, but
-  `--fast-model anthropic:claude-opus-5 --effort max` would hit it, so the combination is
-  refused up front with an explanation rather than failing per call.
+- Claude Sonnet 5.5 and Haiku 5.5 allow running without up-front thinking only at `high`
+  effort or below. This includes the default fast model: `--effort xhigh` and
+  `--effort max` require another fast model, such as `--fast-model openai:gpt-6-luna`.
+  Incompatible combinations are refused before any request.
 
 If a call does exhaust its budget, it is retried once at one provider-mapped `--effort`
 level down when that produces a different request. A second truncation is a real failure.

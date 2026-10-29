@@ -7,6 +7,29 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0a1] — 2026-10-29
+
+### Added
+
+- Capability and pricing metadata for GPT-6.1 Sol, GPT-6.1 Terra, GPT-6 Luna,
+  Claude Opus 5.5, Sonnet 5.5, Haiku 5.5, and Fable 5.1. Haiku's rates increase
+  fivefold above 100K input tokens; the new OpenAI models retain the 272K
+  long-context threshold.
+
+### Changed
+
+- Default reviewers and `opus-sonnet` now use Claude Opus 5.5 and Sonnet 5.5.
+  `sol-luna` and `astra-sol-luna` now use GPT-6.1 Sol and GPT-6 Luna; Astra remains
+  the latter preset's final referee. Older models remain available explicitly.
+- Sonnet 5.5's exposition review uses `thinking: {"type": "between_tools"}` to
+  skip up-front thinking. Sonnet 5.5 and Haiku 5.5 require `--effort high` or below
+  on the fast tier. Opus 5.5, Fable 5.1, and GPT-6.1 Sol require reasoning and
+  are rejected on that tier before any requests.
+
+**Resuming an earlier review requires its original reviewer model flags**, or a new
+`--output` directory. The settings guard refuses to mix findings from the old and new
+defaults; stored reviews are not migrated.
+
 ## [0.4.0a1] — 2026-10-29
 
 Prompts brought back in line with the `referee` skill in Mathbox, which was ported from
@@ -334,7 +357,8 @@ First public release. Everything before this lived only in the author's working 
 - The unused `RapidFuzz` dependency, and `.github/requirements.txt` in favour of
   `pyproject.toml`.
 
-[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.4.0a1...HEAD
+[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.5.0a1...HEAD
+[0.5.0a1]: https://github.com/nidrissi/math-scout/compare/v0.4.0a1...v0.5.0a1
 [0.4.0a1]: https://github.com/nidrissi/math-scout/compare/v0.3.0a1...v0.4.0a1
 [0.3.0a1]: https://github.com/nidrissi/math-scout/compare/v0.2.0a2...v0.3.0a1
 [0.2.0a2]: https://github.com/nidrissi/math-scout/releases/tag/v0.2.0a2

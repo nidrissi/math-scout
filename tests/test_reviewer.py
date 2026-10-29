@@ -941,9 +941,21 @@ def test_lower_effort_walks_down_the_scale_and_stops(effort):
 # ------------------------------------------------------------------- settings guard
 
 
-@pytest.mark.parametrize("effort", EFFORT_LEVELS)
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
 def test_validate_settings_accepts_the_default_configuration(effort):
     validate_settings(load_prompts(), max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
+
+
+@pytest.mark.parametrize("effort", ["xhigh", "max"])
+def test_validate_settings_rejects_default_sonnet_without_up_front_thinking(effort):
+    with pytest.raises(ConfigurationError, match="above high.*ExpositionReferee"):
+        validate_settings(load_prompts(), max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
+
+
+@pytest.mark.parametrize("effort", EFFORT_LEVELS)
+def test_validate_settings_allows_all_efforts_with_luna_fast(effort):
+    prompts = load_prompts(fast_model="openai:gpt-6-luna")
+    validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
 
 
 def test_validate_settings_rejects_max_tokens_above_the_ceiling():
@@ -963,8 +975,7 @@ def test_validate_settings_rejects_an_unknown_effort_level():
 
 @pytest.mark.parametrize("effort", ["xhigh", "max"])
 def test_validate_settings_rejects_disabled_thinking_on_a_capped_model(effort):
-    """Opus 5 refuses thinking:disabled above `high`, and both thinking-off reviewers
-    would land there if someone pointed --fast-model at it."""
+    """Opus 5 refuses thinking:disabled above `high` for the exposition reviewer."""
     prompts = load_prompts(fast_model="anthropic:claude-opus-5")
     with pytest.raises(ConfigurationError, match="runs without thinking"):
         validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort=effort)
@@ -996,22 +1007,24 @@ def test_validate_settings_rejects_an_effort_the_model_lacks():
 
 
 def test_validate_settings_ignores_models_it_has_no_table_entry_for():
-    prompts = load_prompts(strong_model="anthropic:some-future-model")
+    prompts = load_prompts(
+        strong_model="anthropic:some-future-model", fast_model="anthropic:future-fast"
+    )
     validate_settings(prompts, max_tokens=DEFAULT_MAX_TOKENS, effort="max")
 
 
 def test_state_settings_qualify_every_provider_model():
     defaults = run_settings(load_prompts(), DEFAULT_MAX_TOKENS, "high")
     assert set(defaults["models"].values()) == {
-        "anthropic:claude-opus-5",
-        "anthropic:claude-sonnet-5",
+        "anthropic:claude-opus-5-5",
+        "anthropic:claude-sonnet-5-5",
     }
 
     mixed = run_settings(
         load_prompts(strong_model="openai:gpt-5.6-sol"), DEFAULT_MAX_TOKENS, "high"
     )
     assert mixed["models"]["FormalVerifier"] == "openai:gpt-5.6-sol"
-    assert mixed["models"]["ExpositionReferee"] == "anthropic:claude-sonnet-5"
+    assert mixed["models"]["ExpositionReferee"] == "anthropic:claude-sonnet-5-5"
 
 
 def test_final_model_is_not_part_of_resumable_reviewer_settings():

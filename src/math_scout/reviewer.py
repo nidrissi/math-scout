@@ -35,8 +35,8 @@ from .providers import (
     provider_type,
 )
 
-DEFAULT_MODEL_STRONG = "anthropic:claude-opus-5"
-DEFAULT_MODEL_FAST = "anthropic:claude-sonnet-5"
+DEFAULT_MODEL_STRONG = "anthropic:claude-opus-5-5"
+DEFAULT_MODEL_FAST = "anthropic:claude-sonnet-5-5"
 
 # Every call streams, so `max_tokens` is bounded by provider model capabilities rather
 # than an SDK's non-streaming timeout. This application ceiling remains a typo guard;

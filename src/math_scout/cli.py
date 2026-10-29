@@ -30,11 +30,11 @@ EXIT_INCOMPLETE = 1
 EXIT_CONFIG = 2
 
 MODEL_PRESETS: dict[str, tuple[str, str, str | None]] = {
-    "opus-sonnet": ("anthropic:claude-opus-5", "anthropic:claude-sonnet-5", None),
-    "sol-luna": ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna", None),
+    "opus-sonnet": ("anthropic:claude-opus-5-5", "anthropic:claude-sonnet-5-5", None),
+    "sol-luna": ("openai:gpt-6.1-sol", "openai:gpt-6-luna", None),
     "astra-sol-luna": (
-        "openai:gpt-5.6-sol",
-        "openai:gpt-5.6-luna",
+        "openai:gpt-6.1-sol",
+        "openai:gpt-6-luna",
         "openai:gpt-6-astra",
     ),
 }
@@ -138,7 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=EFFORT_LEVELS,
         help=(
             "How hard the models work. The main cost and latency lever: lower spends "
-            f"fewer tokens, higher reasons more (default: {DEFAULT_EFFORT})"
+            f"fewer tokens, higher reasons more (default: {DEFAULT_EFFORT}). "
+            "The default Sonnet fast model accepts at most high; use another fast "
+            "model, such as openai:gpt-6-luna, for xhigh or max."
         ),
     )
     parser.add_argument(

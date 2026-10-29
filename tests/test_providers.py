@@ -192,6 +192,9 @@ def test_registry_instantiates_only_referenced_providers():
     ("model", "input_rate", "output_rate", "cache_read", "cache_write"),
     [
         ("gpt-6-astra", 10.0, 50.0, 1.0, 12.5),
+        ("gpt-6.1-sol", 2.0, 10.0, 0.1, 2.5),
+        ("gpt-6.1-terra", 1.0, 5.0, 0.05, 1.25),
+        ("gpt-6-luna", 0.1, 0.5, 0.01, 0.125),
         ("gpt-5.6", 4.0, 20.0, 0.4, 5.0),
         ("gpt-5.6-sol", 4.0, 20.0, 0.4, 5.0),
         ("gpt-5.6-terra", 2.0, 12.0, 0.2, 2.5),
@@ -220,23 +223,77 @@ def test_openai_pricing_matches_current_provider_rates(
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
-def test_gpt_6_astra_accepts_every_supported_reasoning_effort(effort):
-    OpenAIProvider.validate_request(
-        "gpt-6-astra", reasoning=True, effort=effort, output_limit=128_000
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"])
+def test_gpt_6_models_accept_every_supported_reasoning_effort(model, effort):
+    OpenAIProvider.validate_request(model, reasoning=True, effort=effort, output_limit=128_000)
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol"])
+def test_reasoning_only_openai_models_reject_disabled_reasoning(model):
+    with pytest.raises(ConfigurationError, match="does not support reasoning effort none"):
+        OpenAIProvider.validate_request(model, reasoning=False, effort="high", output_limit=64_000)
+
+
+@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"])
+def test_gpt_6_models_enforce_their_output_limit(model):
+    with pytest.raises(ConfigurationError, match="at most 128,000 output tokens"):
+        OpenAIProvider.validate_request(model, reasoning=True, effort="high", output_limit=128_001)
+
+
+@pytest.mark.parametrize(
+    ("model", "input_rate", "output_rate", "cache_read", "cache_write"),
+    [
+        ("claude-opus-5-5", 4.0, 20.0, 0.2, 5.0),
+        ("claude-sonnet-5-5", 2.0, 10.0, 0.1, 2.5),
+        ("claude-fable-5-1", 10.0, 50.0, 0.25, 12.5),
+    ],
+)
+def test_current_claude_pricing(model, input_rate, output_rate, cache_read, cache_write):
+    assert AnthropicProvider.pricing(model) == Pricing(
+        input=input_rate, output=output_rate, cache_read=cache_read, cache_write=cache_write
     )
 
 
-def test_gpt_6_astra_rejects_disabled_reasoning():
-    with pytest.raises(ConfigurationError, match="does not support reasoning effort none"):
-        OpenAIProvider.validate_request(
-            "gpt-6-astra", reasoning=False, effort="high", output_limit=64_000
+def test_haiku_5_5_pricing_changes_only_above_100k_input_tokens():
+    pricing = AnthropicProvider.pricing("claude-haiku-5-5")
+    assert pricing is not None
+    assert pricing.input_rate(100_000) == 0.1
+    assert pricing.output_rate(100_000) == 0.5
+    assert pricing.cache_read_rate(100_000) == 0.01
+    assert pricing.cache_write_rate(100_000) == 0.125
+    assert pricing.input_rate(100_001) == 0.5
+    assert pricing.output_rate(100_001) == 2.5
+    assert pricing.cache_read_rate(100_001) == 0.05
+    assert pricing.cache_write_rate(100_001) == 0.625
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-fable-5-1"])
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_reasoning_only_claude_models_reject_disabled_thinking(model, effort):
+    with pytest.raises(ConfigurationError, match="always uses adaptive thinking"):
+        AnthropicProvider.validate_request(
+            model, reasoning=False, effort=effort, output_limit=32_000
         )
 
 
-def test_gpt_6_astra_enforces_its_output_limit():
-    with pytest.raises(ConfigurationError, match="at most 128,000 output tokens"):
-        OpenAIProvider.validate_request(
-            "gpt-6-astra", reasoning=True, effort="high", output_limit=128_001
+@pytest.mark.parametrize("model", ["claude-sonnet-5-5", "claude-haiku-5-5"])
+@pytest.mark.parametrize("effort", ["xhigh", "max"])
+def test_current_fast_claude_models_reject_high_effort_without_thinking(model, effort):
+    with pytest.raises(ConfigurationError, match="above high"):
+        AnthropicProvider.validate_request(
+            model, reasoning=False, effort=effort, output_limit=32_000
+        )
+
+
+@pytest.mark.parametrize(
+    "model", ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"]
+)
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_current_claude_models_accept_reasoning_and_enforce_output_limits(model, effort):
+    AnthropicProvider.validate_request(model, reasoning=True, effort=effort, output_limit=128_000)
+    with pytest.raises(ConfigurationError, match="at most 128,000"):
+        AnthropicProvider.validate_request(
+            model, reasoning=True, effort=effort, output_limit=128_001
         )
 
 
@@ -249,26 +306,46 @@ def test_sonnet_5_pricing_matches_current_provider_rates():
     )
 
 
-def test_anthropic_structured_stream_shape_binds_to_installed_sdk():
+@pytest.mark.parametrize(
+    "model",
+    [
+        "claude-opus-5",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-haiku-5-5",
+    ],
+)
+def test_anthropic_structured_stream_shape_binds_to_installed_sdk(model):
     native = FakeAnthropicClient(anthropic_response(parsed=Review(issues=[])))
     provider = anthropic_provider(native)
 
-    result = provider.generate(request("anthropic:claude-opus-5"))
+    result = provider.generate(request(f"anthropic:{model}"))
 
     assert result.parsed == Review(issues=[])
     (sent,) = native.messages.stream_calls
     inspect.signature(Messages.stream).bind(None, **sent)
-    assert sent["model"] == "claude-opus-5"
+    assert sent["model"] == model
     assert sent["thinking"] == {"type": "adaptive"}
     assert sent["output_config"] == {"effort": "high"}
     assert sent["output_format"] is Review
     assert all(block["cache_control"] == {"type": "ephemeral"} for block in sent["system"])
 
 
-def test_anthropic_markdown_stream_and_token_count_bind_to_installed_sdk():
-    native = FakeAnthropicClient(anthropic_response(text="# Report"))
+@pytest.mark.parametrize(
+    ("model", "thinking"),
+    [
+        ("claude-opus-5", "disabled"),
+        ("claude-sonnet-5-5", "between_tools"),
+        ("claude-haiku-5-5", "disabled"),
+    ],
+)
+@pytest.mark.parametrize("schema", [False, True])
+def test_anthropic_without_thinking_stream_and_token_count_bind_to_sdk(model, thinking, schema):
+    native = FakeAnthropicClient(anthropic_response(text="# Report", parsed=Review(issues=[])))
     provider = anthropic_provider(native)
-    text_request = request("anthropic:claude-opus-5", schema=False, reasoning=False)
+    text_request = request(f"anthropic:{model}", schema=schema, reasoning=False)
+    provider.validate_request(model, reasoning=False, effort="high", output_limit=12_345)
 
     assert provider.generate(text_request).text == "# Report"
     assert provider.count_tokens(text_request) == 321
@@ -277,8 +354,13 @@ def test_anthropic_markdown_stream_and_token_count_bind_to_installed_sdk():
     (count_call,) = native.messages.count_calls
     inspect.signature(Messages.stream).bind(None, **stream_call)
     inspect.signature(Messages.count_tokens).bind(None, **count_call)
-    assert stream_call["thinking"] == {"type": "disabled"}
-    assert "output_format" not in stream_call
+    assert stream_call["thinking"] == {"type": thinking}
+    if schema:
+        assert stream_call["output_format"] is Review
+        assert count_call["output_format"] is Review
+    else:
+        assert "output_format" not in stream_call
+        assert "output_format" not in count_call
 
 
 def test_anthropic_truncation_and_native_errors_are_normalized():
@@ -295,16 +377,17 @@ def test_anthropic_truncation_and_native_errors_are_normalized():
         provider.generate(request("anthropic:claude-opus-5"))
 
 
-def test_openai_structured_stream_uses_developer_blocks_breakpoints_and_cache_key():
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"])
+def test_openai_structured_stream_uses_developer_blocks_breakpoints_and_cache_key(model):
     native = FakeOpenAIClient(openai_response(parsed=Review(issues=[])))
     provider = openai_provider(native)
 
-    result = provider.generate(request("openai:gpt-5.6-sol"))
+    result = provider.generate(request(f"openai:{model}"))
 
     assert result.parsed == Review(issues=[])
     (sent,) = native.responses.stream_calls
     inspect.signature(Responses.stream).bind(None, **sent)
-    assert sent["model"] == "gpt-5.6-sol"
+    assert sent["model"] == model
     assert sent["text_format"] is Review
     assert sent["reasoning"] == {"effort": "high"}
     assert sent["max_output_tokens"] == 12_345
@@ -319,11 +402,12 @@ def test_openai_structured_stream_uses_developer_blocks_breakpoints_and_cache_ke
     assert all(block["type"] == "input_text" for block in user["content"])
 
 
-def test_openai_count_is_exact_request_shape_and_never_generates():
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna"])
+def test_openai_count_is_exact_request_shape_and_never_generates(model):
     native = FakeOpenAIClient(openai_response(parsed=Review(issues=[])))
     provider = openai_provider(native)
 
-    assert provider.count_tokens(request("openai:gpt-5.6-sol")) == 654
+    assert provider.count_tokens(request(f"openai:{model}")) == 654
 
     assert native.responses.stream_calls == []
     (sent,) = native.responses.count_calls
@@ -335,10 +419,12 @@ def test_openai_count_is_exact_request_shape_and_never_generates():
     assert "prompt_cache_key" not in sent  # routing metadata is not a count-endpoint field
 
 
-def test_openai_non_reasoning_uses_none_and_has_no_duplicate_retry_request():
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-6.1-terra", "gpt-6-luna"])
+def test_openai_non_reasoning_uses_none_and_has_no_duplicate_retry_request(model):
     native = FakeOpenAIClient(openai_response(parsed=Review(issues=[])))
     provider = openai_provider(native)
-    non_reasoning = request("openai:gpt-5.6-sol", reasoning=False)
+    non_reasoning = request(f"openai:{model}", reasoning=False)
+    provider.validate_request(model, reasoning=False, effort="high", output_limit=12_345)
 
     provider.generate(non_reasoning)
 

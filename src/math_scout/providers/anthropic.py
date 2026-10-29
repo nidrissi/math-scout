@@ -38,10 +38,17 @@ class AnthropicProvider(Provider):
         "No usable Anthropic credentials. Either export ANTHROPIC_API_KEY, or sign in "
         "with `ant auth login` and the SDK will pick up the stored profile."
     )
-    models_url = "https://platform.claude.com/docs/en/about-claude/models/overview"
+    models_url = "https://platform.claude.com/docs/en/models/overview"
 
-    # efforts, highest effort accepted with thinking explicitly disabled, max output
+    _REASONING_ONLY = frozenset({"claude-fable-5-1", "claude-opus-5-5"})
+
+    # efforts, highest effort accepted without up-front thinking, max output
+    # https://platform.claude.com/docs/en/build-with-claude/effort
     _CAPABILITIES: dict[str, tuple[frozenset[str], str | None, int]] = {
+        "claude-fable-5-1": (_ALL_EFFORTS, None, 128_000),
+        "claude-opus-5-5": (_ALL_EFFORTS, None, 128_000),
+        "claude-sonnet-5-5": (_ALL_EFFORTS, "high", 128_000),
+        "claude-haiku-5-5": (_ALL_EFFORTS, "high", 128_000),
         "claude-opus-5": (_ALL_EFFORTS, "high", 128_000),
         "claude-opus-4-8": (_ALL_EFFORTS, None, 64_000),
         "claude-opus-4-7": (_ALL_EFFORTS, None, 64_000),
@@ -52,6 +59,18 @@ class AnthropicProvider(Provider):
     }
 
     _PRICING = {
+        "claude-fable-5-1": Pricing(input=10.0, output=50.0, cache_read=0.25, cache_write=12.5),
+        "claude-opus-5-5": Pricing(input=4.0, output=20.0, cache_read=0.2, cache_write=5.0),
+        "claude-sonnet-5-5": Pricing(input=2.0, output=10.0, cache_read=0.1, cache_write=2.5),
+        "claude-haiku-5-5": Pricing(
+            input=0.1,
+            output=0.5,
+            cache_read=0.01,
+            cache_write=0.125,
+            long_context_threshold=100_000,
+            long_context_input_multiplier=5.0,
+            long_context_output_multiplier=5.0,
+        ),
         "claude-opus-5": Pricing(input=5.0, output=25.0, cache_read=0.5, cache_write=6.25),
         "claude-opus-4-8": Pricing(input=5.0, output=25.0, cache_read=0.5, cache_write=6.25),
         "claude-opus-4-7": Pricing(input=5.0, output=25.0, cache_read=0.5, cache_write=6.25),
@@ -83,6 +102,11 @@ class AnthropicProvider(Provider):
         support = cls._CAPABILITIES.get(model)
         if support is None:
             return
+        if not reasoning and model in cls._REASONING_ONLY:
+            raise ConfigurationError(
+                f"{model} always uses adaptive thinking and cannot run a reviewer "
+                "without thinking. Choose another model for the fast tier."
+            )
         efforts, disabled_max, max_output = support
         if not efforts:
             raise ConfigurationError(
@@ -100,7 +124,7 @@ class AnthropicProvider(Provider):
             and EFFORT_LEVELS.index(effort) > EFFORT_LEVELS.index(disabled_max)
         ):
             raise ConfigurationError(
-                f"A reviewer runs without thinking on {model}, which rejects "
+                f"A reviewer runs without thinking up front on {model}, which rejects "
                 f"--effort above {disabled_max}. Use --effort {disabled_max} or lower, "
                 "or give it a different model."
             )
@@ -159,12 +183,16 @@ class AnthropicProvider(Provider):
         return [{"role": "user", "content": content}]
 
     def _generation_kwargs(self, request: GenerationRequest) -> dict[str, Any]:
+        thinking = "adaptive" if request.reasoning else "disabled"
+        if not request.reasoning and request.model.model == "claude-sonnet-5-5":
+            # Sonnet 5.5 rejects disabled; without tools this mode returns text only.
+            thinking = "between_tools"
         kwargs: dict[str, Any] = {
             "model": request.model.model,
             "max_tokens": request.output_limit,
             "system": self._system(request),
             "messages": self._messages(request),
-            "thinking": {"type": "adaptive" if request.reasoning else "disabled"},
+            "thinking": {"type": thinking},
             "output_config": {"effort": request.effort},
         }
         if request.output_schema is not None:

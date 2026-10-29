@@ -108,12 +108,12 @@ def test_provider_qualified_models_are_accepted():
         [
             "paper.tex",
             "--strong-model",
-            "openai:gpt-5.6-sol",
+            "openai:gpt-6.1-sol",
             "--final-model",
             "openai:gpt-6-astra",
         ]
     )
-    assert args.strong_model == "openai:gpt-5.6-sol"
+    assert args.strong_model == "openai:gpt-6.1-sol"
     assert args.final_model == "openai:gpt-6-astra"
 
 
@@ -123,18 +123,18 @@ def test_provider_qualified_models_are_accepted():
         (
             "opus-sonnet",
             (
-                "anthropic:claude-opus-5",
-                "anthropic:claude-sonnet-5",
-                "anthropic:claude-opus-5",
+                "anthropic:claude-opus-5-5",
+                "anthropic:claude-sonnet-5-5",
+                "anthropic:claude-opus-5-5",
             ),
         ),
         (
             "sol-luna",
-            ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna", "openai:gpt-5.6-sol"),
+            ("openai:gpt-6.1-sol", "openai:gpt-6-luna", "openai:gpt-6.1-sol"),
         ),
         (
             "astra-sol-luna",
-            ("openai:gpt-5.6-sol", "openai:gpt-5.6-luna", "openai:gpt-6-astra"),
+            ("openai:gpt-6.1-sol", "openai:gpt-6-luna", "openai:gpt-6-astra"),
         ),
     ],
 )
@@ -156,29 +156,29 @@ def test_model_presets_resolve_all_three_model_roles(preset, models):
     [
         (
             "--strong-model",
-            "anthropic:claude-opus-5",
+            "anthropic:claude-opus-5-5",
             (
-                "anthropic:claude-opus-5",
-                "openai:gpt-5.6-luna",
-                "anthropic:claude-opus-5",
+                "anthropic:claude-opus-5-5",
+                "openai:gpt-6-luna",
+                "anthropic:claude-opus-5-5",
             ),
         ),
         (
             "--fast-model",
-            "anthropic:claude-sonnet-5",
+            "anthropic:claude-sonnet-5-5",
             (
-                "openai:gpt-5.6-sol",
-                "anthropic:claude-sonnet-5",
-                "openai:gpt-5.6-sol",
+                "openai:gpt-6.1-sol",
+                "anthropic:claude-sonnet-5-5",
+                "openai:gpt-6.1-sol",
             ),
         ),
         (
             "--final-model",
-            "anthropic:claude-opus-5",
+            "anthropic:claude-opus-5-5",
             (
-                "openai:gpt-5.6-sol",
-                "openai:gpt-5.6-luna",
-                "anthropic:claude-opus-5",
+                "openai:gpt-6.1-sol",
+                "openai:gpt-6-luna",
+                "anthropic:claude-opus-5-5",
             ),
         ),
     ],
@@ -201,6 +201,35 @@ def test_unknown_model_preset_is_rejected():
         cli.build_parser().parse_args(["paper.tex", "--preset", "turbo"])
 
 
+@pytest.mark.parametrize("preset", cli.MODEL_PRESETS)
+def test_current_presets_pass_validation_at_default_effort(paper, tmp_path, monkeypatch, preset):
+    result = PipelineResult(output_dir=tmp_path)
+    assert run([str(paper), "--preset", preset], monkeypatch, result=result) == cli.EXIT_OK
+
+
+@pytest.mark.parametrize(
+    ("fast_model", "effort"),
+    [
+        ("openai:gpt-6.1-sol", "high"),
+        ("anthropic:claude-opus-5-5", "low"),
+        ("anthropic:claude-fable-5-1", "low"),
+        ("anthropic:claude-sonnet-5-5", "xhigh"),
+        ("anthropic:claude-haiku-5-5", "max"),
+    ],
+)
+def test_current_incompatible_fast_models_fail_before_preflight(
+    paper, monkeypatch, fast_model, effort
+):
+    def unexpected_preflight(*args):
+        pytest.fail("An incompatible configuration must fail before preflight")
+
+    monkeypatch.setattr(cli, "check_access", unexpected_preflight)
+    assert (
+        run([str(paper), "--fast-model", fast_model, "--effort", effort], monkeypatch)
+        == cli.EXIT_CONFIG
+    )
+
+
 def test_astra_preset_keeps_its_dedicated_final_model_when_strong_is_overridden():
     args = cli.build_parser().parse_args(
         [
@@ -208,7 +237,7 @@ def test_astra_preset_keeps_its_dedicated_final_model_when_strong_is_overridden(
             "--preset",
             "astra-sol-luna",
             "--strong-model",
-            "anthropic:claude-opus-5",
+            "anthropic:claude-opus-5-5",
         ]
     )
 
@@ -218,8 +247,8 @@ def test_astra_preset_keeps_its_dedicated_final_model_when_strong_is_overridden(
         fast_model=args.fast_model,
         final_model=args.final_model,
     ) == (
-        "anthropic:claude-opus-5",
-        "openai:gpt-5.6-luna",
+        "anthropic:claude-opus-5-5",
+        "openai:gpt-6-luna",
         "openai:gpt-6-astra",
     )
 
@@ -231,7 +260,7 @@ def test_explicit_final_model_overrides_the_astra_preset():
             "--preset",
             "astra-sol-luna",
             "--final-model",
-            "anthropic:claude-opus-5",
+            "anthropic:claude-opus-5-5",
         ]
     )
 
@@ -241,9 +270,9 @@ def test_explicit_final_model_overrides_the_astra_preset():
         fast_model=args.fast_model,
         final_model=args.final_model,
     ) == (
-        "openai:gpt-5.6-sol",
-        "openai:gpt-5.6-luna",
-        "anthropic:claude-opus-5",
+        "openai:gpt-6.1-sol",
+        "openai:gpt-6-luna",
+        "anthropic:claude-opus-5-5",
     )
 
 
@@ -265,8 +294,8 @@ def test_astra_preset_initializes_and_preflights_all_three_models(paper, tmp_pat
     assert run([str(paper), "--preset", "astra-sol-luna"], monkeypatch, result=result) == 0
     expected = {
         "openai:gpt-6-astra",
-        "openai:gpt-5.6-sol",
-        "openai:gpt-5.6-luna",
+        "openai:gpt-6.1-sol",
+        "openai:gpt-6-luna",
     }
     assert {model.qualified for model in constructed} == expected
     assert {model.qualified for model in preflighted} == expected
@@ -275,8 +304,8 @@ def test_astra_preset_initializes_and_preflights_all_three_models(paper, tmp_pat
 @pytest.mark.parametrize(
     ("flag", "value"),
     [
-        ("--strong-model", "claude-opus-5"),
-        ("--fast-model", "gpt-5.6-luna"),
+        ("--strong-model", "claude-opus-5-5"),
+        ("--fast-model", "gpt-6-luna"),
         ("--final-model", "gpt-6-astra"),
         ("--strong-model", "synthetic-model"),
     ],
