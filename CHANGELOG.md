@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.4.0a1] — 2026-10-15
+## [0.4.0a1] — 2026-10-29
 
 Prompts brought back in line with the `referee` skill in Mathbox, which was ported from
 these prompts and refined since.
@@ -28,7 +28,7 @@ with findings from the new ones. Delete it, or pass a different `--output`.
 
 ### Changed
 
-- The final report has eight sections: `Main mathematical concerns`, `Other mathematical
+- The eight-section final report now uses `Main mathematical concerns`, `Other mathematical
   concerns`, `Exposition and organization`, `Claim and scope assessment`, and an `Overall
   assessment` that replaces `Recommendation`. The pipeline is told nothing about the venue
   or its standards, so it no longer issues an accept-or-reject verdict. It says what the
@@ -36,8 +36,9 @@ with findings from the new ones. Delete it, or pass a different `--output`.
   competing with mathematical defects for space among the main concerns.
 - The final referee now rebuilds every alleged failed implication or counterexample
   before reporting it, and grades severity and confidence from that check rather than
-  taking the reviewer's grades. It drops findings whose quote it cannot find in the source,
-  and does not count agreement between reviewers as evidence.
+  taking the reviewer's grades. It requires locating the source passage behind every
+  finding, drops any it cannot check, and does not count agreement between reviewers as
+  evidence.
 - A counterexample now counts only once it is checked against every hypothesis of the
   statement, global conventions included, and its conclusion is shown to fail.
   `AdversarialSkeptic` also checks that any witness lies in the claimed domain. Induction
@@ -57,6 +58,10 @@ with findings from the new ones. Delete it, or pass a different `--output`.
 - `NotationAuditor` reports where it searched before filing an undefined symbol. It no
   longer echoes a section reviewer's "undefined" or "broken reference" lead that the full
   source resolves.
+- Refreshed the locked Anthropic, OpenAI, Pydantic, httpx2, and Ruff dependencies, and
+  updated the uv setup action used by CI.
+- Restored the release workflow that builds and validates distributions, then publishes
+  them to TestPyPI and PyPI when a GitHub release is published.
 
 ## [0.3.0a1] — 2026-09-15
 
