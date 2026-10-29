@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- A reviewer or final referee cut off by `--max-tokens` is retried one effort level down,
+  as documented, instead of failing outright. Every OpenAI truncation, and every
+  truncated Anthropic review, surfaced as an SDK error before the adapter could see it
+  was a truncation. A content-filtered or failed OpenAI response is likewise reported as
+  such, with its metadata, instead of as a missing completion event.
+
 ## [0.5.0] — 2026-10-29
 
 First non-prerelease of the 0.5 series, with the model updates described below for

@@ -258,7 +258,13 @@ class OpenAIProvider(Provider):
     def generate(self, request: GenerationRequest) -> GenerationResult:
         def call():
             with self.client.responses.stream(**self._generation_kwargs(request)) as stream:
-                return stream.get_final_response()
+                # get_final_response() keeps only a response.completed event and raises a
+                # bare RuntimeError otherwise, which would hide truncation and its usage.
+                ended = None
+                for event in stream:
+                    if event.type in ("response.incomplete", "response.failed"):
+                        ended = event.response
+                return ended if ended is not None else stream.get_final_response()
 
         response = self._invoke(call)
         metadata = native_response_metadata(response)

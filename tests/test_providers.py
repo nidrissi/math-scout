@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from types import SimpleNamespace
 from typing import cast
 
@@ -29,6 +30,7 @@ from math_scout.providers import (
     ProviderRateLimitError,
     ProviderRefusalError,
     ProviderRegistry,
+    ProviderRequestError,
 )
 from math_scout.reviewer import Review
 
@@ -58,6 +60,8 @@ def request(
 
 
 class StreamManager:
+    """Hands back a finished response; the real-SDK tests below cover event handling."""
+
     def __init__(self, result=None, error=None):
         self.result = result
         self.error = error
@@ -69,6 +73,9 @@ class StreamManager:
 
     def __exit__(self, *exc_info):
         return False
+
+    def __iter__(self):
+        return iter(())
 
     def get_final_message(self):
         return self.result
@@ -366,8 +373,11 @@ def test_anthropic_structured_stream_shape_binds_to_installed_sdk(model):
     inspect.signature(Messages.stream).bind(None, **sent)
     assert sent["model"] == model
     assert sent["thinking"] == {"type": "adaptive"}
-    assert sent["output_config"] == {"effort": "high"}
-    assert sent["output_format"] is Review
+    assert sent["output_config"] == {
+        "effort": "high",
+        "format": {"type": "json_schema", "schema": anthropic.transform_schema(Review)},
+    }
+    assert "output_format" not in sent  # the SDK would parse before the stop reason
     assert all(block["cache_control"] == {"type": "ephemeral"} for block in sent["system"])
 
 
@@ -381,12 +391,13 @@ def test_anthropic_structured_stream_shape_binds_to_installed_sdk(model):
 )
 @pytest.mark.parametrize("schema", [False, True])
 def test_anthropic_without_thinking_stream_and_token_count_bind_to_sdk(model, thinking, schema):
-    native = FakeAnthropicClient(anthropic_response(text="# Report", parsed=Review(issues=[])))
+    body = Review(issues=[]).model_dump_json() if schema else "# Report"
+    native = FakeAnthropicClient(anthropic_response(text=body))
     provider = anthropic_provider(native)
     text_request = request(f"anthropic:{model}", schema=schema, reasoning=False)
     provider.validate_request(model, reasoning=False, effort="high", output_limit=12_345)
 
-    assert provider.generate(text_request).text == "# Report"
+    assert provider.generate(text_request).text == body
     assert provider.count_tokens(text_request) == 321
 
     (stream_call,) = native.messages.stream_calls
@@ -395,11 +406,11 @@ def test_anthropic_without_thinking_stream_and_token_count_bind_to_sdk(model, th
     inspect.signature(Messages.count_tokens).bind(None, **count_call)
     assert stream_call["thinking"] == {"type": thinking}
     if schema:
-        assert stream_call["output_format"] is Review
-        assert count_call["output_format"] is Review
+        assert stream_call["output_config"]["format"] == count_call["output_config"]["format"]
+        assert stream_call["output_config"]["format"]["type"] == "json_schema"
     else:
-        assert "output_format" not in stream_call
-        assert "output_format" not in count_call
+        assert "format" not in stream_call["output_config"]
+        assert "output_config" not in count_call
 
 
 def test_anthropic_truncation_and_native_errors_are_normalized():
@@ -573,3 +584,175 @@ def test_failed_and_truncated_responses_retain_native_metadata(provider_name):
     with pytest.raises(ProviderRefusalError) as caught:
         build(client_type(failed)).generate(request(model))
     assert caught.value.response_metadata["usage"] == failed.usage.model_dump(mode="json")
+
+
+# The stubs above hand the adapters a finished response. These run the installed SDKs'
+# own stream accumulation over a mock transport, which is where truncation is actually
+# decided.
+
+
+def sse(events: list[dict]) -> bytes:
+    return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in events).encode()
+
+
+def mock_http(body: bytes, request_id_header: str) -> httpx2.Client:
+    def handler(_request):
+        headers = {"content-type": "text/event-stream", request_id_header: "req_stream"}
+        return httpx2.Response(200, headers=headers, content=body)
+
+    return httpx2.Client(transport=httpx2.MockTransport(handler))
+
+
+def anthropic_stream(stop_reason: str, text: str) -> bytes:
+    start_usage = {"input_tokens": 10, "output_tokens": 1, "cache_read_input_tokens": 3}
+    return sse(
+        [
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_stream",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-opus-5-5",
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": start_usage,
+                },
+            },
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": text},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                "usage": {"output_tokens": 99, "future_delta_usage": {"thinking": 5}},
+            },
+            {"type": "message_stop"},
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "text"),
+    [("end_turn", '{"issues": []}'), ("max_tokens", '{"issues": [{"title": "cut')],
+)
+def test_anthropic_sdk_stream_reports_truncation_and_keeps_stream_metadata(stop_reason, text):
+    client = anthropic.Anthropic(
+        api_key="test",
+        http_client=mock_http(anthropic_stream(stop_reason, text), "request-id"),
+        max_retries=0,
+    )
+
+    result = AnthropicProvider(client).generate(request("anthropic:claude-opus-5-5"))
+
+    # Partial JSON used to raise a ValidationError inside the SDK before the stop
+    # reason arrived, so a truncation was never retried.
+    assert result.truncated is (stop_reason == "max_tokens")
+    assert result.parsed == (None if result.truncated else Review(issues=[]))
+    assert result.response_metadata["stop_reason"] == stop_reason
+
+
+def test_anthropic_sdk_stream_rejects_complete_output_that_misses_the_schema():
+    client = anthropic.Anthropic(
+        api_key="test",
+        http_client=mock_http(anthropic_stream("end_turn", '{"issues": [{'), "request-id"),
+        max_retries=0,
+    )
+
+    with pytest.raises(ProviderEmptyOutputError, match="does not match") as caught:
+        AnthropicProvider(client).generate(request("anthropic:claude-opus-5-5"))
+    assert caught.value.response_metadata["stop_reason"] == "end_turn"
+
+
+def openai_stream(terminal: str, status: str, text: str, reason: str | None = None) -> bytes:
+    def response(state: str, output: list) -> dict:
+        return {
+            "id": "resp_stream",
+            "object": "response",
+            "created_at": 1,
+            "model": "gpt-6.1-sol",
+            "status": state,
+            "output": output,
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "incomplete_details": None if reason is None else {"reason": reason},
+            "error": {"code": "server_error", "message": "boom"} if state == "failed" else None,
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 22,
+                "total_tokens": 33,
+                "input_tokens_details": {"cached_tokens": 5},
+                "output_tokens_details": {"reasoning_tokens": 17, "future_detail": 9},
+            },
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "Review",
+                    "strict": True,
+                    "schema": {"type": "object"},
+                }
+            },
+        }
+
+    item = {"id": "msg_1", "type": "message", "role": "assistant", "status": "in_progress"}
+    part = {"type": "output_text", "text": "", "annotations": []}
+    done = dict(item, status=status, content=[dict(part, text=text)])
+    where = {"output_index": 0, "item_id": "msg_1", "content_index": 0}
+    events = [
+        {"type": "response.created", "response": response("in_progress", [])},
+        {"type": "response.output_item.added", "output_index": 0, "item": dict(item, content=[])},
+        {"type": "response.content_part.added", **where, "part": part},
+        {"type": "response.output_text.delta", **where, "delta": text, "logprobs": []},
+    ]
+    if status == "completed":
+        events += [
+            {"type": "response.output_text.done", **where, "text": text, "logprobs": []},
+            {"type": "response.output_item.done", "output_index": 0, "item": done},
+        ]
+    events.append({"type": terminal, "response": response(status, [done])})
+    return sse([dict(event, sequence_number=n) for n, event in enumerate(events)])
+
+
+@pytest.mark.parametrize(
+    ("terminal", "status", "reason", "error"),
+    [
+        ("response.completed", "completed", None, None),
+        ("response.incomplete", "incomplete", "max_output_tokens", None),
+        ("response.incomplete", "incomplete", "content_filter", ProviderRefusalError),
+        ("response.failed", "failed", None, ProviderRequestError),
+    ],
+)
+def test_openai_sdk_stream_keeps_every_terminal_response(terminal, status, reason, error):
+    text = '{"issues": []}' if status == "completed" else '{"issues": [{"ti'
+    client = openai.OpenAI(
+        api_key="test",
+        http_client=mock_http(openai_stream(terminal, status, text, reason), "x-request-id"),
+        max_retries=0,
+    )
+    provider = OpenAIProvider(client)
+
+    # get_final_response() alone raised a bare RuntimeError for anything but completed.
+    if error is None:
+        result = provider.generate(request("openai:gpt-6.1-sol"))
+        assert result.truncated is (status == "incomplete")
+        assert result.parsed == (Review(issues=[]) if status == "completed" else None)
+        metadata = result.response_metadata
+    else:
+        with pytest.raises(error) as caught:
+            provider.generate(request("openai:gpt-6.1-sol"))
+        metadata = caught.value.response_metadata
+    assert metadata["status"] == status
+    assert metadata["usage"]["output_tokens_details"] == {
+        "reasoning_tokens": 17,
+        "future_detail": 9,
+    }

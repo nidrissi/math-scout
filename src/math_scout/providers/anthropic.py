@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 import anthropic
+from pydantic import BaseModel, ValidationError
 
 from .base import (
     EFFORT_LEVELS,
@@ -183,22 +184,29 @@ class AnthropicProvider(Provider):
         ]
         return [{"role": "user", "content": content}]
 
+    @staticmethod
+    def _output_format(schema: type[BaseModel]) -> dict[str, Any]:
+        # Sent as a raw format, not as `output_format=`: the SDK would then validate the
+        # JSON when the text block closes, before the stop reason arrives, so a reply cut
+        # off by max_tokens would raise instead of being reported as truncated.
+        return {"type": "json_schema", "schema": anthropic.transform_schema(schema)}
+
     def _generation_kwargs(self, request: GenerationRequest) -> dict[str, Any]:
         thinking = "adaptive" if request.reasoning else "disabled"
         if not request.reasoning and request.model.model == "claude-sonnet-5-5":
             # Sonnet 5.5 rejects disabled; without tools this mode returns text only.
             thinking = "between_tools"
-        kwargs: dict[str, Any] = {
+        output_config: dict[str, Any] = {"effort": request.effort}
+        if request.output_schema is not None:
+            output_config["format"] = self._output_format(request.output_schema)
+        return {
             "model": request.model.model,
             "max_tokens": request.output_limit,
             "system": self._system(request),
             "messages": self._messages(request),
             "thinking": {"type": thinking},
-            "output_config": {"effort": request.effort},
+            "output_config": output_config,
         }
-        if request.output_schema is not None:
-            kwargs["output_format"] = request.output_schema
-        return kwargs
 
     def preflight(self, model: str) -> None:
         self._invoke(
@@ -219,13 +227,21 @@ class AnthropicProvider(Provider):
         if stop_reason == "refusal":
             raise ProviderRefusalError("Anthropic refused the request.", response_metadata=metadata)
         truncated = stop_reason == "max_tokens"
-        parsed = getattr(response, "parsed_output", None)
         texts = [
             block.text
             for block in getattr(response, "content", [])
             if getattr(block, "type", None) == "text"
         ]
         text = "".join(texts) or None
+        parsed = None
+        if not truncated and request.output_schema is not None and text is not None:
+            try:
+                parsed = request.output_schema.model_validate_json(text)
+            except ValidationError as exc:
+                raise ProviderEmptyOutputError(
+                    "Anthropic returned structured output that does not match the schema.",
+                    response_metadata=metadata,
+                ) from exc
         if not truncated and request.output_schema is not None and parsed is None:
             raise ProviderEmptyOutputError(
                 "Anthropic returned no parsed structured output.", response_metadata=metadata
@@ -259,7 +275,7 @@ class AnthropicProvider(Provider):
             "messages": self._messages(request),
         }
         if request.output_schema is not None:
-            kwargs["output_format"] = request.output_schema
+            kwargs["output_config"] = {"format": self._output_format(request.output_schema)}
         response = self._invoke(lambda: self.client.messages.count_tokens(**kwargs))
         return response.input_tokens
 
