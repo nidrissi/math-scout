@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-29
+
+First non-prerelease of the 0.5 series, with the model updates described below for
+0.5.0a1. No runtime changes from that version.
+
 ## [0.5.0a1] — 2026-10-29
 
 ### Added
@@ -357,8 +362,9 @@ First public release. Everything before this lived only in the author's working 
 - The unused `RapidFuzz` dependency, and `.github/requirements.txt` in favour of
   `pyproject.toml`.
 
-[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.5.0a1...HEAD
-[0.5.0a1]: https://github.com/nidrissi/math-scout/compare/v0.4.0a1...v0.5.0a1
+[Unreleased]: https://github.com/nidrissi/math-scout/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/nidrissi/math-scout/compare/v0.4.0a1...v0.5.0
+[0.5.0a1]: https://pypi.org/project/math-scout/0.5.0a1/
 [0.4.0a1]: https://github.com/nidrissi/math-scout/compare/v0.3.0a1...v0.4.0a1
 [0.3.0a1]: https://github.com/nidrissi/math-scout/compare/v0.2.0a2...v0.3.0a1
 [0.2.0a2]: https://github.com/nidrissi/math-scout/releases/tag/v0.2.0a2
