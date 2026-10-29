@@ -156,12 +156,10 @@ Populate the structured output schema. Every field is required and every field i
 
 ## Discipline
 
-- **An empty `issues` array is a correct and common answer.** You are not being measured
-  on volume, and a run that reports nothing on a sound section is working as intended.
-  Padding a report with weak findings makes the real ones harder to see and is the single
-  most damaging thing you can do here.
-- Prefer few well-evidenced findings to many thin ones. Two solid findings beat eight
-  hedged ones.
+- Report every distinct, supported defect in your lane. An empty `issues` array is
+  appropriate when your checks identify no supported defect. Do not invent findings.
+- Check each substantive inference and explain any failure with concrete evidence.
+  There is no target number of findings; calibrate confidence to the evidence.
 - One defect, one finding. When the same defect recurs in the text you are reviewing,
   file it once and list the other occurrences in `analysis`.
 - Review the claim exactly as stated. Do not paraphrase the paper into a weaker claim and
