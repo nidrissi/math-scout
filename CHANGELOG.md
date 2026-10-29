@@ -7,6 +7,10 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+**This invalidates existing output directories.** The review protocol changed, so a
+`review/` made with 0.5.0 is refused rather than mixed with findings from the new
+protocol. Delete it, or pass a different `--output`.
+
 ### Added
 
 - `response_metadata.jsonl`, an append-only debugging log of every generation attempt:
@@ -15,6 +19,14 @@ All notable changes to this project are documented here. The format is based on
   without generated content: response and request IDs, status or stop reason, and
   complete usage including reasoning-token and cache details. It plays no part in resume
   or findings, and an entry that cannot be written costs a warning, not the review.
+
+### Changed
+
+- The review protocol no longer tells reviewers to prefer few findings. Each reviewer
+  reports every distinct defect in its lane that it can quote and support, with no
+  target number; an empty report is still the right answer when nothing turns up. Limits
+  in an individual reviewer's prompt still govern, such as NotationAuditor's cap of
+  fifteen findings and ExpositionReferee's expectation of about one per section.
 
 ### Fixed
 

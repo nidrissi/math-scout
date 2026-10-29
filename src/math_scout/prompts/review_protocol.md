@@ -156,10 +156,14 @@ Populate the structured output schema. Every field is required and every field i
 
 ## Discipline
 
-- Report every distinct, supported defect in your lane. An empty `issues` array is
-  appropriate when your checks identify no supported defect. Do not invent findings.
-- Check each substantive inference and explain any failure with concrete evidence.
-  There is no target number of findings; calibrate confidence to the evidence.
+- Report every distinct defect in your lane that you can support: one you can quote and
+  say what fails, at the confidence the evidence earns, leads included on the terms
+  above. There is no target number of findings, high or low. An empty `issues` array is
+  the right answer when your checks turn up nothing you can support. Do not invent
+  findings, and do not pad a report with ones you cannot support.
+- Work through everything your lane covers in the text under review, not only the first
+  problems you notice. Where your `# REVIEWER PROMPT` block limits how many findings to
+  file or which to prefer, that limit governs.
 - One defect, one finding. When the same defect recurs in the text you are reviewing,
   file it once and list the other occurrences in `analysis`.
 - Review the claim exactly as stated. Do not paraphrase the paper into a weaker claim and
