@@ -89,12 +89,24 @@ class GenerationResult:
     response_metadata: dict[str, Any] | None = None
 
 
-def native_response_metadata(response: BaseModel) -> dict[str, Any]:
-    """Keep native response fields, including future usage details, without content."""
+def native_response_metadata(
+    response: BaseModel, *, request_id: str | None = None
+) -> dict[str, Any]:
+    """Keep native response fields, including future usage details, without content.
+
+    Dumped as the SDKs' own `to_dict` does: API field names (`schema`, not pydantic's
+    `schema_`), and only fields the API sent, so an absent field is not mistaken for a
+    returned null. `to_dict` itself cannot exclude content, and serializing content is
+    both wasted work and a source of SDK union warnings. Streamed responses carry no
+    `_request_id`, so callers pass the ID from the stream's HTTP response.
+    """
     metadata = response.model_dump(
-        mode="json", exclude={"output", "content", "parsed_output", "output_parsed"}
+        mode="json",
+        by_alias=True,
+        exclude_unset=True,
+        exclude={"output", "content", "parsed_output", "output_parsed"},
     )
-    request_id = getattr(response, "_request_id", None)
+    request_id = request_id or getattr(response, "_request_id", None)
     if request_id is not None:
         metadata["request_id"] = request_id
     return metadata

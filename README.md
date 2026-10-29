@@ -331,10 +331,12 @@ log: if you edit the paper and re-run, it keeps the superseded findings too.
 synthesis, including truncation retries at their actual effort. Each entry identifies
 the reviewer, section and chunk hash, requested model and settings, timestamp, and elapsed
 time. Its `response` object preserves the provider's native response fields, including
-IDs, status or stop reason, complete nested usage (such as OpenAI reasoning-token counts
-and Anthropic cache details), and additional fields returned by the SDK. These fields
-are not normalized across providers; unavailable counts are not inferred. Generated
-content and SDK-parsed findings are excluded from this metadata object.
+the response and request IDs, status or stop reason, complete nested usage (such as
+OpenAI reasoning-token counts and Anthropic cache details), and additional fields
+returned by the SDK. Fields keep the API's names, and a field the API did not return is
+absent rather than `null`. These fields are not normalized across providers;
+unavailable counts are not inferred. Generated content and parsed findings are excluded
+from this metadata object.
 
 Failed attempts include an error type and any available final-response metadata; after
 a transport or SDK parsing failure, `response` is `null`. Retries hidden inside the SDK

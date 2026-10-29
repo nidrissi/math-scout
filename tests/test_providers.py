@@ -62,6 +62,8 @@ def request(
 class StreamManager:
     """Hands back a finished response; the real-SDK tests below cover event handling."""
 
+    request_id = None
+
     def __init__(self, result=None, error=None):
         self.result = result
         self.error = error
@@ -550,7 +552,7 @@ def test_native_response_metadata_keeps_nested_usage_and_unknown_fields(provider
 
     result = provider.generate(request(model))
     metadata = result.response_metadata
-    assert metadata["usage"] == response.usage.model_dump(mode="json")
+    assert metadata["usage"] == response.usage.to_dict(mode="json")
     assert metadata["future_response_field"] == {"native": True}
     assert metadata["id"] == response.id
     assert metadata["model"] == response.model
@@ -580,15 +582,15 @@ def test_failed_and_truncated_responses_retain_native_metadata(provider_name):
         model = "anthropic:claude-opus-5-5"
     result = build(client_type(truncated)).generate(request(model))
     assert result.truncated
-    assert result.response_metadata["usage"] == truncated.usage.model_dump(mode="json")
+    assert result.response_metadata["usage"] == truncated.usage.to_dict(mode="json")
     with pytest.raises(ProviderRefusalError) as caught:
         build(client_type(failed)).generate(request(model))
-    assert caught.value.response_metadata["usage"] == failed.usage.model_dump(mode="json")
+    assert caught.value.response_metadata["usage"] == failed.usage.to_dict(mode="json")
 
 
 # The stubs above hand the adapters a finished response. These run the installed SDKs'
-# own stream accumulation over a mock transport, which is where truncation is actually
-# decided.
+# own stream accumulation over a mock transport, which is where truncation and request
+# IDs are actually decided.
 
 
 def sse(events: list[dict]) -> bytes:
@@ -658,7 +660,16 @@ def test_anthropic_sdk_stream_reports_truncation_and_keeps_stream_metadata(stop_
     # reason arrived, so a truncation was never retried.
     assert result.truncated is (stop_reason == "max_tokens")
     assert result.parsed == (None if result.truncated else Review(issues=[]))
-    assert result.response_metadata["stop_reason"] == stop_reason
+    metadata = result.response_metadata
+    assert metadata["request_id"] == "req_stream"
+    assert metadata["stop_reason"] == stop_reason
+    # The final delta's unknown field survives, and unsent fields stay absent, not null.
+    assert metadata["usage"] == {
+        "input_tokens": 10,
+        "output_tokens": 99,
+        "cache_read_input_tokens": 3,
+        "future_delta_usage": {"thinking": 5},
+    }
 
 
 def test_anthropic_sdk_stream_rejects_complete_output_that_misses_the_schema():
@@ -670,7 +681,7 @@ def test_anthropic_sdk_stream_rejects_complete_output_that_misses_the_schema():
 
     with pytest.raises(ProviderEmptyOutputError, match="does not match") as caught:
         AnthropicProvider(client).generate(request("anthropic:claude-opus-5-5"))
-    assert caught.value.response_metadata["stop_reason"] == "end_turn"
+    assert caught.value.response_metadata["request_id"] == "req_stream"
 
 
 def openai_stream(terminal: str, status: str, text: str, reason: str | None = None) -> bytes:
@@ -751,8 +762,11 @@ def test_openai_sdk_stream_keeps_every_terminal_response(terminal, status, reaso
         with pytest.raises(error) as caught:
             provider.generate(request("openai:gpt-6.1-sol"))
         metadata = caught.value.response_metadata
+    assert metadata["request_id"] == "req_stream"
     assert metadata["status"] == status
     assert metadata["usage"]["output_tokens_details"] == {
         "reasoning_tokens": 17,
         "future_detail": 9,
     }
+    assert "cache_write_tokens" not in metadata["usage"]["input_tokens_details"]
+    assert metadata["text"]["format"]["schema"] == {"type": "object"}  # API name, not schema_

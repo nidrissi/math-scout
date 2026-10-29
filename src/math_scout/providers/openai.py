@@ -255,6 +255,13 @@ class OpenAIProvider(Provider):
                     return getattr(content, "refusal", None) or "OpenAI refused the request."
         return None
 
+    @staticmethod
+    def _request_id(stream: Any) -> str | None:
+        # The SDK sets `_request_id` only on non-streamed responses, and ResponseStream
+        # exposes its HTTP response only privately.
+        headers = getattr(getattr(stream, "_response", None), "headers", None)
+        return None if headers is None else headers.get("x-request-id")
+
     def generate(self, request: GenerationRequest) -> GenerationResult:
         def call():
             with self.client.responses.stream(**self._generation_kwargs(request)) as stream:
@@ -264,10 +271,11 @@ class OpenAIProvider(Provider):
                 for event in stream:
                     if event.type in ("response.incomplete", "response.failed"):
                         ended = event.response
-                return ended if ended is not None else stream.get_final_response()
+                response = ended if ended is not None else stream.get_final_response()
+                return response, self._request_id(stream)
 
-        response = self._invoke(call)
-        metadata = native_response_metadata(response)
+        response, request_id = self._invoke(call)
+        metadata = native_response_metadata(response, request_id=request_id)
         refusal = self._refusal(response)
         if refusal is not None:
             raise ProviderRefusalError(refusal, response_metadata=metadata)

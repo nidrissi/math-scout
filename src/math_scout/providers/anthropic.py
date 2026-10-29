@@ -219,10 +219,22 @@ class AnthropicProvider(Provider):
     def generate(self, request: GenerationRequest) -> GenerationResult:
         def call():
             with self.client.messages.stream(**self._generation_kwargs(request)) as stream:
-                return stream.get_final_message()
+                # The SDK copies only the usage fields it knows from message_delta into
+                # the final message, so collect the rest here. Delta counts are totals.
+                delta_usage: dict[str, Any] = {}
+                for event in stream:
+                    if event.type == "message_delta":
+                        delta_usage.update(
+                            (name, value)
+                            for name, value in event.usage.to_dict(mode="json").items()
+                            if value is not None
+                        )
+                return stream.get_final_message(), delta_usage, stream.request_id
 
-        response = self._invoke(call)
-        metadata = native_response_metadata(response)
+        response, delta_usage, request_id = self._invoke(call)
+        metadata = native_response_metadata(response, request_id=request_id)
+        if delta_usage:
+            metadata["usage"] = {**metadata.get("usage", {}), **delta_usage}
         stop_reason = getattr(response, "stop_reason", None)
         if stop_reason == "refusal":
             raise ProviderRefusalError("Anthropic refused the request.", response_metadata=metadata)
