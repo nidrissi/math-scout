@@ -46,6 +46,7 @@ from math_scout.reviewer import (
     Issue,
     IssueWithReviewer,
     PipelineResult,
+    ResumeState,
     Review,
     ReviewerScope,
     SeverityLevel,
@@ -1723,6 +1724,72 @@ def test_pipeline_refuses_symlink_in_managed_output_tree(tmp_path):
     assert client.parse_calls == []
 
 
+def resume_state() -> ResumeState:
+    state = ResumeState(settings={"effort": "high"})
+    state.mark("0123456789abcdef", "FormalVerifier", "000_Alpha_FormalVerifier.json")
+    return state
+
+
+def test_state_save_leaves_the_old_state_whole_when_interrupted(tmp_path, monkeypatch):
+    """Written in place, a crash mid-save left unreadable JSON and stranded every review."""
+    path = tmp_path / "state.json"
+    state = resume_state()
+    state.save(path)
+    before = path.read_bytes()
+    assert json.loads(before)["completed"] == state.completed
+    assert not (tmp_path / "state.json.tmp").exists()
+
+    def crash(fd):
+        raise OSError("interrupted")
+
+    monkeypatch.setattr("math_scout.reviewer.os.fsync", crash)
+    state.mark("fedcba9876543210", "FormalVerifier", "001_Beta_FormalVerifier.json")
+    with pytest.raises(OSError, match="interrupted"):
+        state.save(path)
+
+    assert path.read_bytes() == before
+
+
+def test_pipeline_refuses_a_symlinked_state_temporary_before_generation(tmp_path):
+    source = tmp_path / "paper.tex"
+    source.write_text(sections(("Alpha", "aaa")), encoding="utf-8")
+    (tmp_path / "out").mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("sentinel", encoding="utf-8")
+    (tmp_path / "out" / "state.json.tmp").symlink_to(victim)
+    client = FakeProvider(issues_per_call=1)
+
+    with pytest.raises(ConfigurationError, match="symbolic link"):
+        run_pipeline(
+            registry(client), str(source), tmp_path / "out", prompts=load_prompts(), assume_yes=True
+        )
+
+    assert victim.read_text(encoding="utf-8") == "sentinel"
+    assert client.parse_calls == []
+
+
+def test_state_save_refuses_a_symlink_planted_after_the_preflight(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("sentinel", encoding="utf-8")
+    (tmp_path / "state.json.tmp").symlink_to(victim)
+
+    with pytest.raises(OSError):
+        resume_state().save(tmp_path / "state.json")
+
+    assert victim.read_text(encoding="utf-8") == "sentinel"
+    assert not (tmp_path / "state.json").exists()
+
+
+def test_state_is_saved_where_o_nofollow_is_missing(tmp_path, monkeypatch):
+    monkeypatch.delattr("math_scout.reviewer.os.O_NOFOLLOW")  # as on Windows
+    state = resume_state()
+
+    state.save(tmp_path / "state.json")
+
+    stored = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert stored["completed"] == state.completed
+
+
 def test_declining_the_run_deletes_nothing(tmp_path, monkeypatch):
     review(tmp_path, sections(*THREE))
     before = stems_in(tmp_path / "out" / "reviews")
@@ -2345,6 +2412,34 @@ def test_identical_chunks_share_one_review_and_the_dry_run_counts_it_once(tmp_pa
         f"000_Proof_{reviewer}.json"
         for reviewer in sorted(("FormalVerifier", "AdversarialSkeptic", "ExpositionReferee"))
     ]
+
+
+def test_identical_chunks_report_their_findings_once(tmp_path, capsys):
+    """One review serves every copy of a chunk, so its findings reach the final referee
+    once: on the first run, on a resume, and in the dry run's prediction of that resume."""
+    tex = sections(("Proof", "same"), ("Proof", "same"), ("Tail", "zzz"))
+    calls = 2 * SECTION_CALLS + PAPER_CALLS
+
+    client, first = review(tmp_path, tex)
+    assert len(client.parse_calls) == calls
+    assert len(first.issues) == calls
+    stored = json.loads((tmp_path / "out" / "all_issues.json").read_text(encoding="utf-8"))
+    assert len(stored) == calls
+    capsys.readouterr()
+
+    predicted = dry_run(tmp_path, tex)
+    dry_out = capsys.readouterr().out
+    again, resumed = resume(tmp_path, tex)
+    real_out = capsys.readouterr().out
+
+    assert again.parse_calls == []
+    assert resumed.issues == first.issues
+    (final,) = again.create_calls
+    assert known_issues_block(final) == f"# DETECTED ISSUES\n{format_all_issues(first.issues)}"
+    (counted,) = predicted.count_calls
+    assert known_issues_block(counted) == known_issues_block(final)
+    assert f"{calls} already complete in" in dry_out
+    assert f"{calls} already complete and reused" in real_out
 
 
 @pytest.mark.parametrize("directory", ["[draft]", "[/x]"])

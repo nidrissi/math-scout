@@ -75,6 +75,9 @@ REVIEW_PROTOCOL_PROMPT = "review_protocol.md"
 
 # Resume bookkeeping, written alongside the reviews.
 STATE_FILE = "state.json"
+# Written in full and then renamed over STATE_FILE, so a crash mid-save never leaves a
+# truncated state.json that strands every stored review.
+STATE_TMP_FILE = STATE_FILE + ".tmp"
 STATE_VERSION = 1
 RESPONSE_METADATA_FILE = "response_metadata.jsonl"
 
@@ -1021,6 +1024,15 @@ def _generate_with_metadata(
     return response
 
 
+def _open_nofollow(path: Path, flags: int) -> int:
+    """Open a pipeline-managed file for writing, refusing a symlink at *path*.
+
+    O_NOFOLLOW refuses a symlink planted after the pre-flight check, atomically. Windows
+    lacks it, and is left with the pre-flight check alone.
+    """
+    return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o644)
+
+
 def _append_metadata_record(metadata_file: Path | None, record: dict, started: float) -> None:
     """Append one attempt to the debugging log, never at the cost of the attempt itself.
 
@@ -1032,10 +1044,7 @@ def _append_metadata_record(metadata_file: Path | None, record: dict, started: f
     record["elapsed_seconds"] = time.monotonic() - started
     try:
         line = json.dumps(record, ensure_ascii=False) + "\n"
-        # O_NOFOLLOW refuses a symlink planted after the pre-flight check, atomically.
-        # Windows lacks it, and is left with the pre-flight check alone.
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(metadata_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | nofollow, 0o644)
+        fd = _open_nofollow(metadata_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
         with os.fdopen(fd, "a", encoding="utf-8") as log:
             log.write(line)
     except (OSError, TypeError, ValueError) as exc:
@@ -1291,11 +1300,23 @@ class ResumeState:
             del self.renaming[key]
 
     def save(self, path: Path) -> None:
+        """Replace *path* atomically, so a reader sees the old state or the new, never half.
+
+        Written in place, a crash mid-save left JSON the next run could not read, and every
+        stored review was stranded until someone repaired it by hand.
+        """
         stored: dict = {"version": STATE_VERSION, "settings": self.settings}
         stored["completed"] = self.completed
         if self.renaming:
             stored["renaming"] = self.renaming
-        path.write_text(json.dumps(stored, indent=2), encoding="utf-8")
+        tmp = path.with_name(path.name + ".tmp")
+        fd = _open_nofollow(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(json.dumps(stored, indent=2))
+            file.flush()
+            os.fsync(file.fileno())
+        # A rename replaces a symlink at *path* rather than writing through it.
+        os.replace(tmp, path)
 
 
 def _validate_stored_review_filename(filename: object, state_path: Path | None = None) -> str:
@@ -1356,6 +1377,7 @@ def _check_managed_output_tree(output_dir: Path) -> None:
     managed_dirs = (output_dir, output_dir / "reviews", output_dir / "chunks")
     managed_files = (
         output_dir / STATE_FILE,
+        output_dir / STATE_TMP_FILE,
         output_dir / "issues.jsonl",
         output_dir / RESPONSE_METADATA_FILE,
         output_dir / "all_issues.json",
@@ -1725,8 +1747,8 @@ def run_pipeline(
 
     scheduled = [(key, name) for key in keys for name in section_reviewers]
     scheduled += [(paper_key, name) for name in paper_reviewers]
-    done = sum(state.is_done(key, name) for key, name in scheduled)
-    # A chunk identical to an earlier one reuses the review just made for it.
+    # A chunk identical to an earlier one shares its key, and with it the earlier review.
+    done = len({pair for pair in scheduled if state.is_done(*pair)})
     pending = len({pair for pair in scheduled if not state.is_done(*pair)})
     plan = f"[bold]{pending} reviewer call(s) to make"
     if done:
@@ -1760,6 +1782,10 @@ def run_pipeline(
     # Rebuilt from the stored reviews rather than from issues.jsonl, so a run that was
     # interrupted between writing a review and appending to the log loses nothing.
     all_issues: list[IssueWithReviewer] = []
+    # (chunk key, reviewer) pairs whose findings are already in all_issues. A chunk
+    # identical to an earlier one shares its review, and reporting it again would put
+    # every finding before the final referee twice.
+    reported: set[tuple[str, str]] = set()
 
     def review_chunk(
         key: str, stem: str, chunk: Chunk, reviewers: dict[str, ReviewerConfig]
@@ -1775,11 +1801,19 @@ def run_pipeline(
         for reviewer_name, reviewer in reviewers.items():
             out_path = reviews_dir / f"{stem}_{reviewer_name}.json"
 
+            if (key, reviewer_name) in reported:
+                print(
+                    f"  -> {reviewer_name} [yellow](same text as an earlier chunk, "
+                    "findings reported there)[/yellow]"
+                )
+                continue
+
             if state.is_done(key, reviewer_name):
                 stored = _load_review(reviews_dir / state.review_file(key, reviewer_name))
                 if stored is not None:
                     print(f"  -> {reviewer_name} [yellow](reusing stored review)[/yellow]")
                     all_issues.extend(attribute_issue(iss, reviewer_name) for iss in stored.issues)
+                    reported.add((key, reviewer_name))
                     continue
                 print(
                     f"  -> {reviewer_name} [yellow](stored review unreadable, re-running)[/yellow]"
@@ -1835,6 +1869,7 @@ def run_pipeline(
             state.mark(key, reviewer_name, out_path.name)
             state.save(output_dir / STATE_FILE)
             all_issues.extend(attributed_issues)
+            reported.add((key, reviewer_name))
 
     for key, stem, chunk in zip(keys, stems, chunks, strict=True):
         if result.fatal_error is not None:
@@ -1973,7 +2008,9 @@ def run_dry_run(
             sources[key, reviewer], wanted = located
             state.mark(key, reviewer, wanted)
     collected: list[IssueWithReviewer] = []
-    # A chunk identical to an earlier one reuses the review the real run makes for it.
+    # A chunk identical to an earlier one reuses the review the real run makes for it,
+    # and its findings are reported once, as `run_pipeline` reports them.
+    seen: set[tuple[str, str]] = set()
     counted: set[tuple[str, str]] = set()
     reused = 0
 
@@ -1996,6 +2033,10 @@ def run_dry_run(
         known_issues = summarize_known_issues(collected)
         for reviewer_name, reviewer in reviewers.items():
             label = f"  [blue]{escape(chunk.name)}[/blue] / [cyan]{reviewer_name}[/cyan]"
+            if (key, reviewer_name) in seen:
+                print(f"{label}: [yellow]same text as an earlier chunk, counted there[/yellow]")
+                continue
+            seen.add((key, reviewer_name))
             if state.is_done(key, reviewer_name):
                 source = sources.get(
                     (key, reviewer_name), reviews_dir / state.review_file(key, reviewer_name)
@@ -2006,9 +2047,6 @@ def run_dry_run(
                     reused += 1
                     print(f"{label}: [yellow]reusing stored review[/yellow]")
                     continue
-            if (key, reviewer_name) in counted:
-                print(f"{label}: [yellow]same text as an earlier chunk, counted there[/yellow]")
-                continue
 
             request = _generation_request(
                 model=reviewer.model,
