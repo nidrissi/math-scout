@@ -14,6 +14,7 @@ from textwrap import indent
 
 from pydantic import BaseModel
 from rich import print
+from rich.markup import escape
 
 from .providers import (
     EFFORT_LEVELS,
@@ -560,8 +561,8 @@ def resolve_inputs(
         ) from exc
     if _depth >= MAX_INPUT_DEPTH:
         print(
-            f"[yellow]Warning: \\input nesting deeper than {MAX_INPUT_DEPTH} at {path}; "
-            "not expanding further.[/yellow]"
+            f"[yellow]Warning: \\input nesting deeper than {MAX_INPUT_DEPTH} at "
+            f"{escape(str(path))}; not expanding further.[/yellow]"
         )
         return text
 
@@ -573,20 +574,24 @@ def resolve_inputs(
         target = _resolve_reference(reference, search_dirs)
         if target is None:
             print(
-                f"[yellow]Warning: cannot find {reference!r} referenced from {path}; "
-                "leaving the reference unexpanded.[/yellow]"
+                f"[yellow]Warning: cannot find {escape(repr(reference))} referenced from "
+                f"{escape(str(path))}; leaving the reference unexpanded.[/yellow]"
             )
             return match.group(0)
         if not _is_within(target, root):
             # Papers arrive from other people. Without this, \input{/etc/passwd} would
             # read any file the user can read and ship it to the API and into the report.
             print(
-                f"[yellow]Refusing to inline {reference!r} from {path}: it resolves to "
-                f"{target.resolve()}, outside {root.resolve()}.[/yellow]"
+                f"[yellow]Refusing to inline {escape(repr(reference))} from {escape(str(path))}: "
+                f"it resolves to {escape(str(target.resolve()))}, "
+                f"outside {escape(str(root.resolve()))}.[/yellow]"
             )
             return match.group(0)
         if target.resolve() in seen:
-            print(f"[yellow]Warning: circular \\input of {target} from {path}; skipping.[/yellow]")
+            print(
+                f"[yellow]Warning: circular \\input of {escape(str(target))} from "
+                f"{escape(str(path))}; skipping.[/yellow]"
+            )
             return ""
         return resolve_inputs(target, root=root, _seen=seen, _depth=_depth + 1)
 
@@ -1034,7 +1039,9 @@ def _append_metadata_record(metadata_file: Path | None, record: dict, started: f
         with os.fdopen(fd, "a", encoding="utf-8") as log:
             log.write(line)
     except (OSError, TypeError, ValueError) as exc:
-        print(f"[yellow]Could not append to {metadata_file}: {exc}[/yellow]")
+        print(
+            f"[yellow]Could not append to {escape(str(metadata_file))}: {escape(str(exc))}[/yellow]"
+        )
 
 
 def call_reviewer(
@@ -1087,7 +1094,7 @@ def call_reviewer(
     if response.parsed is None and response.truncated and retry_effort is not None:
         print(
             f"[yellow]  {reviewer.name} exhausted {max_tokens:,} tokens on "
-            f"'{chunk.name}' at --effort {effort}; retrying at {retry_effort}.[/yellow]"
+            f"'{escape(chunk.name)}' at --effort {effort}; retrying at {retry_effort}.[/yellow]"
         )
         _, response = attempt(retry_effort)
 
@@ -1255,6 +1262,10 @@ class ResumeState:
 
     settings: dict
     completed: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Reviews staged at their stored name plus MOVING_SUFFIX, and the name each was being
+    # moved to. Saved before any staged review reaches its target, so recovery from an
+    # interrupted rename never has to guess whose file sits at a target name.
+    renaming: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def is_done(self, key: str, reviewer: str) -> bool:
         return reviewer in self.completed.get(key, {})
@@ -1265,19 +1276,26 @@ class ResumeState:
     def mark(self, key: str, reviewer: str, filename: str) -> None:
         self.completed.setdefault(key, {})[reviewer] = _validate_stored_review_filename(filename)
 
+    def forget(self, key: str, reviewer: str) -> None:
+        """Treat a review as never done, so it is run again."""
+        reviewers = self.completed.get(key, {})
+        reviewers.pop(reviewer, None)
+        if not reviewers:
+            self.completed.pop(key, None)
+
     def prune(self, live_keys: set[str]) -> None:
         """Forget chunks that are no longer in the document."""
         for key in set(self.completed) - live_keys:
             del self.completed[key]
+        for key in set(self.renaming) - live_keys:
+            del self.renaming[key]
 
     def save(self, path: Path) -> None:
-        path.write_text(
-            json.dumps(
-                {"version": STATE_VERSION, "settings": self.settings, "completed": self.completed},
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        stored: dict = {"version": STATE_VERSION, "settings": self.settings}
+        stored["completed"] = self.completed
+        if self.renaming:
+            stored["renaming"] = self.renaming
+        path.write_text(json.dumps(stored, indent=2), encoding="utf-8")
 
 
 def _validate_stored_review_filename(filename: object, state_path: Path | None = None) -> str:
@@ -1313,6 +1331,14 @@ def _validate_completed_state(
     return completed
 
 
+class IncompatibleOutputError(ConfigurationError):
+    """The output directory holds reviews this run cannot reuse.
+
+    A real run refuses it rather than mix incomparable findings into one report. A dry
+    run only has to price the calls, so it can count them as if starting fresh.
+    """
+
+
 def _validate_managed_output_tree(output_dir: Path) -> None:
     """Refuse symlinks in paths the pipeline reads, overwrites, moves, or deletes.
 
@@ -1320,6 +1346,13 @@ def _validate_managed_output_tree(output_dir: Path) -> None:
     arrive with a crafted review/ tree. Following one of its symlinks would let chunk or
     report writes escape the output directory even when every generated filename is safe.
     """
+    try:
+        _check_managed_output_tree(output_dir)
+    except OSError as exc:
+        raise ConfigurationError(f"Cannot inspect output directory {output_dir}: {exc}") from exc
+
+
+def _check_managed_output_tree(output_dir: Path) -> None:
     managed_dirs = (output_dir, output_dir / "reviews", output_dir / "chunks")
     managed_files = (
         output_dir / STATE_FILE,
@@ -1355,6 +1388,12 @@ def _validate_managed_output_tree(output_dir: Path) -> None:
                 raise ConfigurationError(
                     f"Refusing to use symbolic link in pipeline-managed output: {path}"
                 )
+            # Stored reviews are read, and staged reviews moved over target names: a FIFO
+            # would hang that read, and a directory would fail the move halfway through.
+            if not path.is_file():
+                raise ConfigurationError(
+                    f"Pipeline-managed output path is not a regular file: {path}"
+                )
 
 
 def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
@@ -1369,7 +1408,7 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
 
     if not state_path.exists():
         if reviews_dir.is_dir() and any(reviews_dir.glob("*.json")):
-            raise ConfigurationError(
+            raise IncompatibleOutputError(
                 f"{reviews_dir} holds reviews but {state_path} is missing, so there is no "
                 "record of what produced them. Delete the output directory or pass a "
                 "different --output."
@@ -1385,23 +1424,98 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
         raise ConfigurationError(f"Invalid resume state object in {state_path}.")
 
     if stored.get("version") != STATE_VERSION:
-        raise ConfigurationError(
+        raise IncompatibleOutputError(
             f"{state_path} was written by a different version of math-scout. Delete the "
             "output directory or pass a different --output."
         )
 
     if stored.get("settings") != settings:
         changed = _describe_settings_change(stored.get("settings") or {}, settings)
-        raise ConfigurationError(
+        raise IncompatibleOutputError(
             f"{output_dir} holds a run made with different settings ({changed}). Reusing "
             "those reviews would report findings that the current settings did not "
             "produce. Delete the output directory or pass a different --output."
         )
 
-    completed = _validate_completed_state(
-        stored.get("completed"), state_path, set(settings["models"])
+    reviewer_names = set(settings["models"])
+    completed = _validate_completed_state(stored.get("completed"), state_path, reviewer_names)
+    renaming = _validate_completed_state(stored.get("renaming", {}), state_path, reviewer_names)
+    return ResumeState(settings=settings, completed=completed, renaming=renaming)
+
+
+def _output_dir(tex_path: str, output_dir: Path | str | None) -> Path:
+    return Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
+
+
+@dataclass(frozen=True)
+class ResumeLayout:
+    """Which chunks a run reviews and under which names, shared by the real and dry runs."""
+
+    output_dir: Path
+    settings: dict
+    keys: list[str]
+    stems: list[str]
+    paper_chunk: Chunk
+    paper_key: str
+    paper_stem: str
+
+    @property
+    def reviews_dir(self) -> Path:
+        return self.output_dir / "reviews"
+
+    @property
+    def live_keys(self) -> set[str]:
+        # Without the whole-paper key, every resume would discard its reviews.
+        return set(self.keys) | {self.paper_key}
+
+    @property
+    def stem_by_key(self) -> dict[str, str]:
+        """The filename stem each chunk's reviews are kept under.
+
+        Identical chunks share a key, and the real run reuses the first one's reviews for
+        the rest, so they stay under the first one's stem.
+        """
+        stems: dict[str, str] = {}
+        for key, stem in zip(self.keys, self.stems, strict=True):
+            stems.setdefault(key, stem)
+        stems.setdefault(self.paper_key, self.paper_stem)
+        return stems
+
+
+def _resume_layout(
+    tex: str,
+    chunks: list[Chunk],
+    output_dir: Path,
+    prompts: LoadedPrompts,
+    max_tokens: int,
+    effort: str,
+) -> ResumeLayout:
+    # Paper-scoped reviewers are handed the whole source as one more chunk, so they get
+    # the same identity, storage and resume behaviour as a section without a second
+    # bookkeeping path. It goes last, so they see every section finding.
+    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
+    return ResumeLayout(
+        output_dir=output_dir,
+        settings=run_settings(prompts, max_tokens=max_tokens, effort=effort),
+        keys=[chunk_key(chunk) for chunk in chunks],
+        stems=[chunk_stem(index, chunk) for index, chunk in enumerate(chunks)],
+        paper_chunk=paper_chunk,
+        paper_key=chunk_key(paper_chunk),
+        paper_stem=chunk_stem(len(chunks), paper_chunk),
     )
-    return ResumeState(settings=settings, completed=completed)
+
+
+def _open_resume_state(output_dir: Path, settings: dict, live_keys: set[str]) -> ResumeState:
+    """Validate *output_dir* and load its resume state, forgetting chunks no longer live.
+
+    Writes nothing, so the dry run can predict exactly what a real run would reuse. The
+    caller must include the whole-paper key in *live_keys*, or every resume discards its
+    reviews.
+    """
+    _validate_managed_output_tree(output_dir)
+    state = load_resume_state(output_dir, settings)
+    state.prune(live_keys)
+    return state
 
 
 def _describe_settings_change(old: dict, new: dict) -> str:
@@ -1425,7 +1539,58 @@ def _load_review(path: Path) -> Review | None:
         return None
 
 
-def retarget_reviews(state: ResumeState, stems: dict[str, str], reviews_dir: Path) -> int:
+def _plan_review_retargets(
+    state: ResumeState, stems: dict[str, str], reviews_dir: Path
+) -> dict[tuple[str, str], tuple[Path, str] | None]:
+    """Locate every stored review that is not at the name this run wants for it.
+
+    Maps each such (chunk key, reviewer) to the path now holding the review and the
+    name it should end under, or to None when the review is gone and must be run again.
+    Changes neither files nor *state*, so the dry run and the real run share one answer.
+
+    `retarget_reviews` stages before it saves `state.renaming` and moves to targets only
+    after, so a review not in that journal can only be at its stored or staging name.
+    A file at its target name may be another chunk's leftover review and is never taken.
+    A journaled review is at its staging name or its journaled target. Its stored name may
+    by then hold another review that was moved onto it.
+    """
+    plan: dict[tuple[str, str], tuple[Path, str] | None] = {}
+    for key, reviewers in state.completed.items():
+        if key not in stems:
+            continue
+        for reviewer, stored in reviewers.items():
+            stored = _validate_stored_review_filename(stored)
+            wanted = _validate_stored_review_filename(f"{stems[key]}_{reviewer}.json")
+            target = state.renaming.get(key, {}).get(reviewer)
+
+            if target is None:
+                candidates = (reviews_dir / stored, reviews_dir / (stored + MOVING_SUFFIX))
+            else:
+                target = _validate_stored_review_filename(target)
+                candidates = (reviews_dir / (stored + MOVING_SUFFIX), reviews_dir / target)
+
+            for path in candidates:
+                if path.is_symlink():
+                    raise ConfigurationError(
+                        f"Refusing to use symbolic link in pipeline-managed output: {path}"
+                    )
+
+            source = next((path for path in candidates if path.is_file()), None)
+            if target is None and stored != wanted and all(p.is_file() for p in candidates):
+                # Staging moves a file, so it never leaves both. A run from before the
+                # journal could, by moving another review onto this stored name.
+                source = None
+            if source is None:
+                plan[key, reviewer] = None
+            elif source != reviews_dir / stored or stored != wanted:
+                plan[key, reviewer] = (source, wanted)
+
+    return plan
+
+
+def retarget_reviews(
+    state: ResumeState, stems: dict[str, str], reviews_dir: Path, state_path: Path
+) -> int:
     """Move stored reviews to the filenames this run's chunk positions imply.
 
     A reused review keeps whatever name it was written under, and the index prefix in
@@ -1433,53 +1598,44 @@ def retarget_reviews(state: ResumeState, stems: dict[str, str], reviews_dir: Pat
     chunk's position shifts while its stored review does not, so the directory stops
     sorting in document order and a reader cannot tell which file is current.
 
-    Renaming is safe to interrupt: the move is atomic, and a crash before *state* is
-    saved leaves it naming a file that is gone, which `_load_review` reports as not done
-    and the run repeats. That costs one call and loses nothing, the same trade the rest
-    of the resume bookkeeping makes.
+    One review's target can be another's source, so every review is first staged under
+    its stored name plus MOVING_SUFFIX. The targets are journaled in *state_path* before
+    the first move to a target, which is what lets `_plan_review_retargets` recover an
+    interrupted run without guessing. A review that can no longer be found is forgotten,
+    so it is run again. Returns the number of reviews moved to a new name.
     """
-    planned: list[tuple[str, str, str, str]] = []
-    for key, reviewers in state.completed.items():
-        if key not in stems:
-            continue
-        for reviewer, stored in reviewers.items():
-            stored = _validate_stored_review_filename(stored)
-            wanted = _validate_stored_review_filename(f"{stems[key]}_{reviewer}.json")
-            if stored == wanted:
-                continue
-
-            stored_path = reviews_dir / stored
-            moving_path = reviews_dir / (stored + MOVING_SUFFIX)
-            wanted_path = reviews_dir / wanted
-
-            for path in (stored_path, moving_path, wanted_path):
-                if path.is_symlink():
-                    raise ConfigurationError(
-                        f"Refusing to use symbolic link in pipeline-managed output: {path}"
-                    )
-
-            if stored_path.is_file() or moving_path.is_file():
-                planned.append((key, reviewer, stored, wanted))
-            elif wanted_path.is_file():
-                # Rename finished previously but state.json was not saved.
-                state.completed[key][reviewer] = wanted
-
-    if not planned:
+    plan = _plan_review_retargets(state, stems, reviews_dir)
+    if not plan and not state.renaming:
         return 0
 
-    # Two phases. One rename's target can be another's source, so avoid clobbering.
-    for _, _, stored, _ in planned:
-        stored_path = reviews_dir / stored
-        if stored_path.is_file():
-            stored_path.replace(reviews_dir / (stored + MOVING_SUFFIX))
+    moves: dict[tuple[str, str], str] = {}
+    for (key, reviewer), located in plan.items():
+        if located is None:
+            state.forget(key, reviewer)
+            continue
+        source, wanted = located
+        if source == reviews_dir / wanted:
+            state.mark(key, reviewer, wanted)
+            continue
+        staged = reviews_dir / (state.review_file(key, reviewer) + MOVING_SUFFIX)
+        if source != staged:
+            source.replace(staged)
+        moves[key, reviewer] = wanted
 
-    for key, reviewer, stored, wanted in planned:
-        moving_path = reviews_dir / (stored + MOVING_SUFFIX)
-        if moving_path.is_file():
-            moving_path.replace(reviews_dir / wanted)
-        state.completed[key][reviewer] = wanted
+    state.renaming = {}
+    for key, reviewer in moves:
+        state.renaming.setdefault(key, {})[reviewer] = moves[key, reviewer]
+    if moves:
+        state.save(state_path)
 
-    return len(planned)
+    for (key, reviewer), wanted in moves.items():
+        staged = reviews_dir / (state.review_file(key, reviewer) + MOVING_SUFFIX)
+        staged.replace(reviews_dir / wanted)
+    for (key, reviewer), wanted in moves.items():
+        state.mark(key, reviewer, wanted)
+    state.renaming = {}
+    state.save(state_path)
+    return len(moves)
 
 
 def sweep(directory: Path, live: set[str], patterns: tuple[str, ...]) -> list[str]:
@@ -1529,8 +1685,11 @@ def run_pipeline(
     tex, chunks, global_context = _prepare(tex_path, split)
     cache_key = prompt_cache_key(tex)
 
-    output_dir = Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
-    reviews_dir = output_dir / "reviews"
+    output_dir = _output_dir(tex_path, output_dir)
+    layout = _resume_layout(tex, chunks, output_dir, prompts, max_tokens, effort)
+    keys, stems = layout.keys, layout.stems
+    paper_chunk, paper_key, paper_stem = layout.paper_chunk, layout.paper_key, layout.paper_stem
+    reviews_dir = layout.reviews_dir
     issues_file = output_dir / "issues.jsonl"
     metadata_file = output_dir / RESPONSE_METADATA_FILE
     chunks_dir = output_dir / "chunks"
@@ -1538,19 +1697,7 @@ def run_pipeline(
     section_reviewers = prompts.scoped(ReviewerScope.SECTION)
     paper_reviewers = prompts.scoped(ReviewerScope.PAPER)
 
-    # Paper-scoped reviewers are handed the whole source as one more chunk, so they get
-    # the same identity, storage and resume behaviour as a section without a second
-    # bookkeeping path. It goes last, so they see every section finding.
-    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
-    paper_key = chunk_key(paper_chunk)
-    paper_stem = chunk_stem(len(chunks), paper_chunk)
-
-    settings = run_settings(prompts, max_tokens=max_tokens, effort=effort)
-    _validate_managed_output_tree(output_dir)
-    state = load_resume_state(output_dir, settings)
-    keys = [chunk_key(chunk) for chunk in chunks]
-    # The whole-paper key has to be live too, or every resume discards its reviews.
-    state.prune(set(keys) | {paper_key})
+    state = _open_resume_state(output_dir, layout.settings, layout.live_keys)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(exist_ok=True)
@@ -1558,7 +1705,6 @@ def run_pipeline(
 
     result = PipelineResult(output_dir=output_dir)
 
-    stems = [chunk_stem(index, chunk) for index, chunk in enumerate(chunks)]
     written = list(zip(stems, chunks, strict=True))
     if paper_reviewers:
         written.append((paper_stem, paper_chunk))
@@ -1566,21 +1712,22 @@ def run_pipeline(
         chunk_path = chunks_dir / f"{stem}.tex"
         chunk_path.write_text(chunk.content, encoding="utf-8")
         print(
-            f"[green]Extracted chunk:[/green] {chunk.name} "
-            f"(written to {chunk_path}, {len(chunk.content)} chars)"
+            f"[green]Extracted chunk:[/green] {escape(chunk.name)} "
+            f"(written to {escape(str(chunk_path))}, {len(chunk.content)} chars)"
         )
 
     preview = global_context[:500]
     ellipsis = "…" if len(global_context) > 500 else ""
     print(
         f"[green]Extracted global context ({len(global_context)} chars):[/green]\n"
-        f"[gray]{preview}{ellipsis}[/gray]"
+        f"[gray]{escape(preview)}{ellipsis}[/gray]"
     )
 
     scheduled = [(key, name) for key in keys for name in section_reviewers]
     scheduled += [(paper_key, name) for name in paper_reviewers]
     done = sum(state.is_done(key, name) for key, name in scheduled)
-    pending = len(scheduled) - done
+    # A chunk identical to an earlier one reuses the review just made for it.
+    pending = len({pair for pair in scheduled if not state.is_done(*pair)})
     plan = f"[bold]{pending} reviewer call(s) to make"
     if done:
         plan += f", {done} already complete and reused"
@@ -1594,10 +1741,8 @@ def run_pipeline(
     # Only now, with the run committed. Writing output before the prompt is one thing;
     # deleting a previous run's on the way to a question the user may answer "no" is
     # another, and a declined run should leave the directory exactly as it found it.
-    stem_by_key = dict(zip(keys, stems, strict=True)) | {paper_key: paper_stem}
-    moved = retarget_reviews(state, stem_by_key, reviews_dir)
+    moved = retarget_reviews(state, layout.stem_by_key, reviews_dir, output_dir / STATE_FILE)
     if moved:
-        state.save(output_dir / STATE_FILE)
         print(
             f"[yellow]Renamed {moved} stored review(s) to match the current section order.[/yellow]"
         )
@@ -1606,7 +1751,9 @@ def run_pipeline(
     removed = sweep(reviews_dir, live_reviews, ("*.json", f"*{MOVING_SUFFIX}"))
     removed += sweep(chunks_dir, {f"{stem}.tex" for stem, _ in written}, ("*.tex",))
     if removed:
-        print(f"[yellow]Removed {len(removed)} stale file(s): {', '.join(removed)}[/yellow]")
+        print(
+            f"[yellow]Removed {len(removed)} stale file(s): {escape(', '.join(removed))}[/yellow]"
+        )
 
     print("[bold blue]Starting multi-reviewer analysis...[/bold blue]")
 
@@ -1622,7 +1769,7 @@ def run_pipeline(
         Sets ``result.fatal_error`` and returns early when the API says every remaining
         call would fail the same way.
         """
-        print(f"[bold blue]Reviewing:[/bold blue] {chunk.name}")
+        print(f"[bold blue]Reviewing:[/bold blue] {escape(chunk.name)}")
         known_issues = summarize_known_issues(all_issues)
 
         for reviewer_name, reviewer in reviewers.items():
@@ -1656,14 +1803,20 @@ def run_pipeline(
             except FATAL_PROVIDER_ERRORS as exc:
                 # Credentials or the model itself are wrong, so every remaining call
                 # would fail identically. Stop rather than burn through the whole paper.
-                print(f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]")
+                print(
+                    f"  [red]ERROR: {reviewer_name} on '{escape(chunk.name)}' failed: "
+                    f"{escape(str(exc))}[/red]"
+                )
                 result.fatal_error = (
                     f"Aborting: {type(exc).__name__} from the API means every remaining "
                     f"call would fail the same way. {exc}"
                 )
                 return
             except Exception as exc:
-                print(f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]")
+                print(
+                    f"  [red]ERROR: {reviewer_name} on '{escape(chunk.name)}' failed: "
+                    f"{escape(str(exc))}[/red]"
+                )
                 result.failures.append(
                     ReviewerFailure(section=chunk.name, reviewer=reviewer_name, error=str(exc))
                 )
@@ -1703,9 +1856,9 @@ def run_pipeline(
     )
 
     if result.fatal_error is not None:
-        print(f"\n[red]{result.fatal_error}[/red]")
+        print(f"\n[red]{escape(result.fatal_error)}[/red]")
         print(
-            f"[yellow]Issues collected so far are preserved in {all_issues_path}. "
+            f"[yellow]Issues collected so far are preserved in {escape(str(all_issues_path))}. "
             "Fix the problem and re-run the same command to resume.[/yellow]"
         )
         return result
@@ -1717,7 +1870,8 @@ def run_pipeline(
         )
         for failure in result.failures:
             print(
-                f"  [yellow]- {failure.reviewer} on '{failure.section}': {failure.error}[/yellow]"
+                f"  [yellow]- {failure.reviewer} on '{escape(failure.section)}': "
+                f"{escape(failure.error)}[/yellow]"
             )
 
     print("[bold blue]Running final referee synthesis...[/bold blue]")
@@ -1740,16 +1894,16 @@ def run_pipeline(
             f"Aborting: {type(exc).__name__} from the API means every remaining call "
             f"would fail the same way. {exc}"
         )
-        print(f"[red]ERROR: final referee synthesis failed: {exc}[/red]")
+        print(f"[red]ERROR: final referee synthesis failed: {escape(str(exc))}[/red]")
         print(
-            f"[yellow]Collected issues are preserved in {all_issues_path}; "
+            f"[yellow]Collected issues are preserved in {escape(str(all_issues_path))}; "
             "fix the problem and re-run the same command to resume.[/yellow]"
         )
         return result
     except Exception as exc:
-        print(f"[red]ERROR: final referee synthesis failed: {exc}[/red]")
+        print(f"[red]ERROR: final referee synthesis failed: {escape(str(exc))}[/red]")
         print(
-            f"[yellow]Collected issues are preserved in {all_issues_path}; "
+            f"[yellow]Collected issues are preserved in {escape(str(all_issues_path))}; "
             "re-run the same command to retry the synthesis.[/yellow]"
         )
         result.failures.append(
@@ -1770,25 +1924,59 @@ def run_pipeline(
 def run_dry_run(
     providers: ProviderRegistry,
     tex_path: str,
+    output_dir: Path | str | None = None,
     prompts: LoadedPrompts | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
     split: SplitLevel = SplitLevel.SECTION,
 ) -> None:
-    """Count exact request inputs and optionally estimate cost, without generation."""
+    """Count exact request inputs and optionally estimate cost, without generation.
+
+    Reviews a real run in *output_dir* would reuse are not counted, and their findings
+    fill the known-issues blocks as they would in that run. Nothing is written: the
+    directory is read and validated exactly as `run_pipeline` would, but never changed.
+    """
     prompts = load_prompts() if prompts is None else prompts
 
     print("[yellow]DRY RUN — token counting only, no generation requests will be sent.[/yellow]")
     print(
         "[yellow]Each displayed count is exact for the request shown to the provider. "
-        "The run total remains a lower bound because the known-issues block grows from "
-        "generated findings, which do not exist during a dry run. Cost estimates also "
-        "exclude unpriced models and do not predict provider-specific cache hits.[/yellow]\n"
+        "Cost estimates exclude unpriced models and do not predict provider-specific "
+        "cache hits.[/yellow]\n"
     )
 
     tex, chunks, global_context = _prepare(tex_path, split)
-    empty_known_issues = summarize_known_issues([])
     cache_key = prompt_cache_key(tex)
+
+    output_dir = _output_dir(tex_path, output_dir)
+    layout = _resume_layout(tex, chunks, output_dir, prompts, max_tokens, effort)
+    reviews_dir = layout.reviews_dir
+    try:
+        # Stored findings are sent to the count endpoint, so this validation is what
+        # keeps a crafted review/ tree from sending arbitrary local files to the provider.
+        state = _open_resume_state(output_dir, layout.settings, layout.live_keys)
+    except IncompatibleOutputError as exc:
+        # Pricing different settings is a reason to dry-run, not a mistake. Nothing is
+        # read from the directory, so counting from scratch exposes none of it.
+        print(
+            f"[yellow]A real run would stop here: {escape(str(exc))}\n"
+            "Its stored reviews are ignored, so every call is counted.[/yellow]\n"
+        )
+        state = ResumeState(settings=layout.settings)
+    # Where each review a real run would move is now, so it is read without moving it.
+    sources: dict[tuple[str, str], Path] = {}
+    plan = _plan_review_retargets(state, layout.stem_by_key, reviews_dir)
+    for (key, reviewer), located in plan.items():
+        if located is None:
+            state.forget(key, reviewer)
+        else:
+            sources[key, reviewer], wanted = located
+            state.mark(key, reviewer, wanted)
+    collected: list[IssueWithReviewer] = []
+    # A chunk identical to an earlier one reuses the review the real run makes for it.
+    counted: set[tuple[str, str]] = set()
+    reused = 0
+
     token_totals: dict[ModelRef, int] = {}
     call_counts: dict[ModelRef, int] = {}
     request_token_counts: dict[ModelRef, list[int]] = {}
@@ -1801,38 +1989,58 @@ def run_dry_run(
     def count_request(request: GenerationRequest) -> int:
         return providers.for_model(request.model).count_tokens(request)
 
-    def count_reviewer(chunk: Chunk, reviewer: ReviewerConfig) -> None:
-        request = _generation_request(
-            model=reviewer.model,
-            system_prompt=reviewer.prompt_text,
-            global_context=global_context,
-            known_issues=empty_known_issues,
-            to_review=_format_review_target(chunk, reviewer.scope),
-            reasoning=reviewer.thinking,
-            effort=effort,
-            max_tokens=max_tokens,
-            with_schema=True,
-            review_protocol=prompts.review_protocol,
-            prompt_cache_key=cache_key,
-        )
-        n = count_request(request)
-        record(reviewer.model, n)
-        print(f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer.name}[/cyan]: {n:,} input tokens")
+    def count_chunk(key: str, chunk: Chunk, reviewers: dict[str, ReviewerConfig]) -> None:
+        """Count each reviewer `run_pipeline` would call on *chunk*, reusing as it would."""
+        nonlocal reused
+        # Computed once per chunk, at the same point as in `run_pipeline`.
+        known_issues = summarize_known_issues(collected)
+        for reviewer_name, reviewer in reviewers.items():
+            label = f"  [blue]{escape(chunk.name)}[/blue] / [cyan]{reviewer_name}[/cyan]"
+            if state.is_done(key, reviewer_name):
+                source = sources.get(
+                    (key, reviewer_name), reviews_dir / state.review_file(key, reviewer_name)
+                )
+                stored = _load_review(source)
+                if stored is not None:
+                    collected.extend(attribute_issue(iss, reviewer_name) for iss in stored.issues)
+                    reused += 1
+                    print(f"{label}: [yellow]reusing stored review[/yellow]")
+                    continue
+            if (key, reviewer_name) in counted:
+                print(f"{label}: [yellow]same text as an earlier chunk, counted there[/yellow]")
+                continue
 
-    for chunk in chunks:
-        for reviewer in prompts.scoped(ReviewerScope.SECTION).values():
-            count_reviewer(chunk, reviewer)
+            request = _generation_request(
+                model=reviewer.model,
+                system_prompt=reviewer.prompt_text,
+                global_context=global_context,
+                known_issues=known_issues,
+                to_review=_format_review_target(chunk, reviewer.scope),
+                reasoning=reviewer.thinking,
+                effort=effort,
+                max_tokens=max_tokens,
+                with_schema=True,
+                review_protocol=prompts.review_protocol,
+                prompt_cache_key=cache_key,
+            )
+            n = count_request(request)
+            record(reviewer.model, n)
+            counted.add((key, reviewer_name))
+            print(f"{label}: {n:,} input tokens")
 
-    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
-    for reviewer in prompts.scoped(ReviewerScope.PAPER).values():
-        count_reviewer(paper_chunk, reviewer)
+    for key, chunk in zip(layout.keys, chunks, strict=True):
+        count_chunk(key, chunk, prompts.scoped(ReviewerScope.SECTION))
+
+    paper_reviewers = prompts.scoped(ReviewerScope.PAPER)
+    if paper_reviewers:
+        count_chunk(layout.paper_key, layout.paper_chunk, paper_reviewers)
 
     final_model = prompts.final_model
     final_request = _generation_request(
         model=final_model,
         system_prompt=prompts.final_referee,
         global_context=global_context,
-        known_issues="[]",
+        known_issues=format_all_issues(collected),
         to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
         reasoning=True,
         effort=effort,
@@ -1843,6 +2051,19 @@ def run_dry_run(
     n = count_request(final_request)
     record(final_model, n)
     print(f"  [blue]Final referee[/blue]: {n:,} input tokens")
+
+    pending = len(counted)
+    plan = f"\n[bold]{pending} reviewer call(s) to make"
+    if reused:
+        plan += f", {reused} already complete in {escape(str(output_dir))} and reused"
+    print(plan + ", then one final referee call.[/bold]")
+    if pending:
+        print(
+            "[yellow]The run total is a lower bound: the known-issues blocks will also "
+            "carry the findings of the pending calls, which do not exist yet.[/yellow]"
+        )
+    else:
+        print("[yellow]Every review is stored, so the final referee count is exact.[/yellow]")
 
     def pricing_for(model: ModelRef):
         return provider_type(model.provider).pricing(model.model)

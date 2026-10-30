@@ -7,6 +7,7 @@ transforms LaTeX text or reads files from a tmp_path fixture.
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -44,6 +45,7 @@ from math_scout.reviewer import (
     ConfigurationError,
     Issue,
     IssueWithReviewer,
+    PipelineResult,
     Review,
     ReviewerScope,
     SeverityLevel,
@@ -58,6 +60,7 @@ from math_scout.reviewer import (
     chunk_key,
     chunk_stem,
     extract_global_context,
+    format_all_issues,
     format_coverage_note,
     load_known_issues,
     load_prompts,
@@ -1920,6 +1923,464 @@ def test_dry_run_applies_long_context_pricing_per_request(tmp_path, capsys):
     # Six 300,001-token requests: 2x the $2/M input rate and 1.5x the $12/M output rate.
     assert "Estimated input cost (no cache): $7.20" in out
     assert "Max output cost: $3.46" in out
+
+
+def dry_run(tmp_path, tex: str, **kwargs):
+    """Dry-run *tex* against the output dir `review` writes to, returning the client."""
+    source = tmp_path / "paper.tex"
+    source.write_text(tex, encoding="utf-8")
+    client = FakeProvider()
+    run_dry_run(
+        registry(client),
+        str(source),
+        tmp_path / "out",
+        prompts=load_prompts(**kwargs.pop("models", {})),
+        **kwargs,
+    )
+    return client
+
+
+def known_issues_block(request) -> str:
+    return next(block.text for block in request.blocks if block.role == "user")
+
+
+def output_tree(tmp_path) -> dict[str, int]:
+    return {
+        str(path.relative_to(tmp_path)): path.stat().st_mtime_ns
+        for path in sorted(tmp_path.rglob("*"))
+    }
+
+
+def test_dry_run_counts_only_the_final_referee_when_every_review_is_stored(tmp_path, capsys):
+    _, result = review(tmp_path, sections(*THREE))
+    capsys.readouterr()
+
+    client = dry_run(tmp_path, sections(*THREE))
+
+    (final,) = client.count_calls
+    # The same findings, in the same order, as the real run handed its final referee.
+    assert known_issues_block(final) == f"# DETECTED ISSUES\n{format_all_issues(result.issues)}"
+    out = capsys.readouterr().out
+    assert out.count("reusing stored review") == THREE_CALLS
+    assert "0 reviewer call(s) to make" in out
+    assert "final referee count is exact" in out
+
+
+def test_dry_run_counts_an_edited_section_with_the_stored_findings_before_it(tmp_path):
+    review(tmp_path, sections(*THREE))
+
+    client = dry_run(tmp_path, sections(("Alpha", "aaa"), ("Beta", "edited"), ("Gamma", "ggg")))
+
+    # Beta's three section passes, both whole-paper passes, and the final referee.
+    assert len(client.count_calls) == SECTION_CALLS + PAPER_CALLS + 1
+    beta = client.count_calls[0]
+    assert "SECTION TITLE: Beta" in beta.blocks[-1].text
+    # Alpha's stored findings, one per section reviewer, as a resumed run would send.
+    assert known_issues_block(beta).count("\n- [") == SECTION_CALLS
+
+
+def test_dry_run_counts_a_corrupt_stored_review_as_pending(tmp_path):
+    review(tmp_path, sections(*THREE))
+    stored = sorted((tmp_path / "out" / "reviews").glob("*.json"))[0]
+    stored.write_text("{ not json", encoding="utf-8")
+
+    client = dry_run(tmp_path, sections(*THREE))
+
+    assert len(client.count_calls) == 2
+
+
+def interrupt_rename(out: Path, stored: str, target: str, stage: str) -> Path:
+    """Leave review *stored* where `retarget_reviews` would if interrupted at *stage*:
+    staged, staged and journaled, or moved to *target*. Returns the review's path."""
+    reviews = out / "reviews"
+    staged = reviews / (stored + MOVING_SUFFIX)
+    (reviews / stored).replace(staged)
+    if stage == "staged":
+        return staged
+    state_path = out / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    key, reviewer = next(
+        (key, reviewer)
+        for key, reviewers in state["completed"].items()
+        for reviewer, name in reviewers.items()
+        if name == stored
+    )
+    state["renaming"] = {key: {reviewer: target}}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    if stage == "journaled":
+        return staged
+    staged.replace(reviews / target)
+    return reviews / target
+
+
+RENAME_STAGES = ["staged", "journaled", "finished"]
+
+
+@pytest.mark.parametrize("rename_stage", RENAME_STAGES)
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_dry_run_predicts_recovery_of_an_interrupted_rename(tmp_path, rename_stage, corrupt):
+    review(tmp_path, sections(*THREE))
+    recovered = interrupt_rename(
+        tmp_path / "out",
+        "000_Alpha_FormalVerifier.json",
+        "001_Alpha_FormalVerifier.json",
+        rename_stage,
+    )
+    if corrupt:
+        recovered.write_text("{ not json", encoding="utf-8")
+    # Inserting a section shifts Alpha's filename while preserving its chunk key.
+    tex = sections(("New", "nnn"), *THREE)
+    before = output_tree(tmp_path / "out")
+
+    predicted = dry_run(tmp_path, tex)
+
+    assert output_tree(tmp_path / "out") == before
+    # Empty new findings let us compare every request exactly: dry-run already knows
+    # all the findings this resume will use, including the recovered review's issue.
+    actual = FakeProvider()
+    result = run_pipeline(
+        registry(actual),
+        str(tmp_path / "paper.tex"),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+    )
+
+    assert len(actual.parse_calls) == SECTION_CALLS + PAPER_CALLS + int(corrupt)
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    assert len(result.issues) == 3 * SECTION_CALLS - int(corrupt)
+
+
+@pytest.mark.parametrize("rename_stage", RENAME_STAGES)
+def test_dry_run_recovers_paper_reviews_after_a_split_change(tmp_path, rename_stage):
+    tex = sections(("Alpha", "\\subsection{One}\naaa\n\\subsection{Two}\nbbb"), ("Tail", "zzz"))
+    review(tmp_path, tex)
+    interrupt_rename(
+        tmp_path / "out",
+        "002_whole_paper_NotationAuditor.json",
+        "003_whole_paper_NotationAuditor.json",
+        rename_stage,
+    )
+    before = output_tree(tmp_path / "out")
+
+    predicted = dry_run(tmp_path, tex, split=SUB)
+
+    assert output_tree(tmp_path / "out") == before
+    actual = FakeProvider()
+    result = run_pipeline(
+        registry(actual),
+        str(tmp_path / "paper.tex"),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+        split=SUB,
+    )
+
+    assert len(actual.parse_calls) == 2 * SECTION_CALLS
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    assert len(result.issues) == SECTION_CALLS + PAPER_CALLS
+
+
+def test_dry_run_predicts_staged_reviews_swapping_filenames(tmp_path):
+    a, b, tail = ("Lemmas", "aaa"), ("Lemmas", "bbb"), ("Tail", "zzz")
+    review(tmp_path, sections(a, b, tail))
+    reviews = tmp_path / "out" / "reviews"
+    for path in reviews.glob("*_Lemmas_*.json"):
+        path.replace(path.with_name(path.name + MOVING_SUFFIX))
+    before = output_tree(tmp_path / "out")
+
+    predicted = dry_run(tmp_path, sections(b, a, tail))
+
+    assert output_tree(tmp_path / "out") == before
+    actual = FakeProvider()
+    result = run_pipeline(
+        registry(actual),
+        str(tmp_path / "paper.tex"),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+    )
+
+    assert len(actual.parse_calls) == PAPER_CALLS
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    assert len(result.issues) == 3 * SECTION_CALLS
+
+
+def stored_reviews(out: Path) -> dict[tuple[str, str], str]:
+    """Each stored review's content, keyed by chunk and reviewer rather than filename."""
+    state = json.loads((out / "state.json").read_text(encoding="utf-8"))
+    return {
+        (key, reviewer): (out / "reviews" / name).read_text(encoding="utf-8")
+        for key, reviewers in state["completed"].items()
+        for reviewer, name in reviewers.items()
+    }
+
+
+def resume(tmp_path, tex: str) -> tuple[FakeProvider, PipelineResult]:
+    """Resume into `review`'s output dir with no new findings, so every request matches
+    what the dry run counted."""
+    client = FakeProvider()
+    result = run_pipeline(
+        registry(client),
+        str(tmp_path / "paper.tex"),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+    )
+    return client, result
+
+
+# Two Lemmas sections swapping places: three reviewers each, staged and then finished.
+SWAP_RENAMES = 2 * 2 * SECTION_CALLS
+
+
+@pytest.mark.parametrize("crash_at", range(SWAP_RENAMES))
+def test_a_swap_interrupted_at_any_rename_resumes_with_each_review_on_its_own_chunk(
+    tmp_path, monkeypatch, crash_at
+):
+    a, b, tail = ("Lemmas", "aaa"), ("Lemmas", "bbb"), ("Tail", "zzz")
+    review(tmp_path, sections(a, b, tail))
+    out = tmp_path / "out"
+    # Distinct contents, so a review landing on the wrong chunk is visible.
+    for path in (out / "reviews").glob("*.json"):
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        stored["issues"][0]["analysis"] = path.name
+        path.write_text(json.dumps(stored), encoding="utf-8")
+    expected = {
+        entry: content for entry, content in stored_reviews(out).items() if "Lemmas" in content
+    }
+
+    renames = 0
+    real_replace = Path.replace
+
+    def crashing_replace(self, target):
+        nonlocal renames
+        if renames == crash_at:
+            raise KeyboardInterrupt
+        renames += 1
+        return real_replace(self, target)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "replace", crashing_replace)
+        with pytest.raises(KeyboardInterrupt):
+            review(tmp_path, sections(b, a, tail))
+
+    predicted = dry_run(tmp_path, sections(b, a, tail))
+    actual, _ = resume(tmp_path, sections(b, a, tail))
+
+    assert not any("SECTION TITLE: Lemmas" in call.blocks[-1].text for call in actual.parse_calls)
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    after = stored_reviews(out)
+    assert {entry: after[entry] for entry in expected} == expected
+    assert sorted(path.name for path in (out / "reviews").glob("*Lemmas*")) == [
+        f"{index:03d}_Lemmas_{reviewer}.json"
+        for index in (0, 1)
+        for reviewer in sorted(("FormalVerifier", "AdversarialSkeptic", "ExpositionReferee"))
+    ]
+
+
+def test_a_leftover_review_at_the_target_name_is_not_taken_for_a_missing_one(tmp_path):
+    """Both sections' filenames reduce to The_-invariant, so the deleted section's review
+    sits exactly where the surviving section's review is headed."""
+    alpha, beta = ("The $\\alpha$-invariant", "aaa"), ("The $\\beta$-invariant", "bbb")
+    review(tmp_path, sections(alpha, beta, ("Tail", "zzz")))
+    (tmp_path / "out" / "reviews" / "001_The_-invariant_FormalVerifier.json").unlink()
+    tex = sections(beta, ("Tail", "zzz"))
+
+    predicted = dry_run(tmp_path, tex)
+    client, result = resume(tmp_path, tex)
+
+    assert [call.blocks[-1].text.count("SECTION TITLE") for call in client.parse_calls] == [
+        1,
+        0,
+        0,
+    ]
+    assert "SECTION TITLE: The $\\beta$-invariant" in client.parse_calls[0].blocks[-1].text
+    assert predicted.count_calls == client.parse_calls + client.create_calls
+    assert not any(issue.location == alpha[0] for issue in result.issues)
+
+
+def test_an_ambiguous_rename_from_before_the_journal_is_run_again(tmp_path):
+    """Earlier versions moved reviews to their targets without a journal. Interrupted
+    mid-swap, they left a stored name holding another chunk's review beside the staged
+    original, which nothing on disk tells apart from staging debris."""
+    a, b, tail = ("Lemmas", "aaa"), ("Lemmas", "bbb"), ("Tail", "zzz")
+    review(tmp_path, sections(a, b, tail))
+    reviews = tmp_path / "out" / "reviews"
+    for path in reviews.glob("*_Lemmas_*.json"):
+        path.replace(path.with_name(path.name + MOVING_SUFFIX))
+    for path in reviews.glob(f"000_Lemmas_*.json{MOVING_SUFFIX}"):
+        path.replace(reviews / path.name.replace("000_", "001_").removesuffix(MOVING_SUFFIX))
+
+    predicted = dry_run(tmp_path, sections(b, a, tail))
+    client, _ = resume(tmp_path, sections(b, a, tail))
+
+    assert len(client.parse_calls) == 2 * SECTION_CALLS + PAPER_CALLS
+    assert predicted.count_calls == client.parse_calls + client.create_calls
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_a_review_that_is_not_a_regular_file_is_refused(tmp_path, kind):
+    """A FIFO would hang the read of a stored review; a directory would fail a rename
+    halfway through."""
+    review(tmp_path, sections(*THREE))
+    stored = tmp_path / "out" / "reviews" / "000_Alpha_FormalVerifier.json"
+    stored.unlink()
+    if kind == "fifo":
+        os.mkfifo(stored)
+    else:
+        stored.mkdir()
+
+    with pytest.raises(ConfigurationError, match="not a regular file"):
+        dry_run(tmp_path, sections(*THREE))
+    with pytest.raises(ConfigurationError, match="not a regular file"):
+        review(tmp_path, sections(("New", "nnn"), *THREE))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable directories")
+def test_an_unreadable_output_directory_is_a_configuration_error(tmp_path):
+    review(tmp_path, sections(*THREE))
+    out = tmp_path / "out"
+    out.chmod(0)
+    try:
+        with pytest.raises(ConfigurationError, match="Cannot inspect output directory"):
+            dry_run(tmp_path, sections(*THREE))
+    finally:
+        out.chmod(0o755)
+
+
+def test_dry_run_leaves_an_existing_output_tree_untouched(tmp_path):
+    """An inserted section would make a real run rename and sweep stored reviews."""
+    review(tmp_path, sections(*THREE))
+    before = output_tree(tmp_path / "out")
+
+    dry_run(tmp_path, sections(("Alpha", "aaa"), ("New", "nnn"), ("Beta", "bbb"), ("Gamma", "ggg")))
+
+    assert output_tree(tmp_path / "out") == before
+
+
+def test_dry_run_creates_no_output_directory(tmp_path):
+    dry_run(tmp_path, sections(*THREE))
+    assert not (tmp_path / "out").exists()
+
+
+def _change_effort(out: Path) -> dict:
+    return {"effort": "low"}
+
+
+def _change_version(out: Path) -> dict:
+    state = json.loads((out / "state.json").read_text(encoding="utf-8"))
+    state["version"] = -1
+    (out / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return {}
+
+
+def _drop_state(out: Path) -> dict:
+    (out / "state.json").unlink()
+    return {}
+
+
+@pytest.mark.parametrize(
+    ("make_incompatible", "reason"),
+    [
+        (_change_effort, "different settings"),
+        (_change_version, "different version"),
+        (_drop_state, "no record of what produced them"),
+    ],
+)
+def test_dry_run_prices_from_scratch_where_a_real_run_would_refuse(
+    tmp_path, capsys, make_incompatible, reason
+):
+    """Asking what other settings would cost is a price check, not a mistake: it must
+    neither be refused nor send the stored findings the real run could not reuse."""
+    review(tmp_path, sections(*THREE))
+    kwargs = make_incompatible(tmp_path / "out")
+    before = output_tree(tmp_path / "out")
+    capsys.readouterr()
+
+    client = dry_run(tmp_path, sections(*THREE), **kwargs)
+
+    assert output_tree(tmp_path / "out") == before
+    assert len(client.count_calls) == THREE_CALLS + 1
+    assert all(known_issues_block(call).count("\n- [") == 0 for call in client.count_calls)
+    out = capsys.readouterr().out
+    assert "A real run would stop here" in out
+    assert reason in " ".join(out.split())
+    with pytest.raises(ConfigurationError, match=reason):
+        review(tmp_path, sections(*THREE), **kwargs)
+
+
+def test_dry_run_with_other_settings_still_refuses_a_symlinked_review(tmp_path):
+    review(tmp_path, sections(*THREE))
+    stored = sorted((tmp_path / "out" / "reviews").glob("*.json"))[0]
+    stored.unlink()
+    stored.symlink_to(tmp_path / "paper.tex")
+
+    with pytest.raises(ConfigurationError, match="symbolic link"):
+        dry_run(tmp_path, sections(*THREE), effort="low")
+
+
+def test_identical_chunks_share_one_review_and_the_dry_run_counts_it_once(tmp_path, capsys):
+    """Chunks with the same title and text have the same key. The real run reviews the
+    first and reuses that review for the rest, so counting both overstates the cost."""
+    tex = sections(("Proof", "same"), ("Proof", "same"), ("Tail", "zzz"))
+    (tmp_path / "paper.tex").write_text(tex, encoding="utf-8")
+
+    predicted = dry_run(tmp_path, tex)
+    dry_out = capsys.readouterr().out
+    actual, _ = resume(tmp_path, tex)
+    real_out = capsys.readouterr().out
+
+    calls = 2 * SECTION_CALLS + PAPER_CALLS
+    assert len(actual.parse_calls) == calls
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    assert f"{calls} reviewer call(s) to make" in dry_out
+    assert f"{calls} reviewer call(s) to make" in real_out
+
+    # Kept under the first occurrence's name, so a resume has nothing to rename.
+    again, _ = resume(tmp_path, tex)
+    assert again.parse_calls == []
+    assert "Renamed" not in capsys.readouterr().out
+    assert sorted(p.name for p in (tmp_path / "out" / "reviews").glob("*Proof*")) == [
+        f"000_Proof_{reviewer}.json"
+        for reviewer in sorted(("FormalVerifier", "AdversarialSkeptic", "ExpositionReferee"))
+    ]
+
+
+@pytest.mark.parametrize("directory", ["[draft]", "[/x]"])
+def test_brackets_in_paths_and_titles_print_as_text(tmp_path, capsys, directory):
+    """Rich reads [...] as markup: an opening tag vanished, and a stray closing tag
+    raised MarkupError after every count had been paid for."""
+    tex = sections(("Proof of [/x] and [bold]", "aaa"), ("Tail", "zzz"))
+    source = tmp_path / "paper.tex"
+    source.write_text(tex, encoding="utf-8")
+    out = tmp_path / directory / "out"
+
+    run_dry_run(registry(FakeProvider()), str(source), out, prompts=load_prompts())
+    run_pipeline(
+        registry(FakeProvider()), str(source), out, prompts=load_prompts(), assume_yes=True
+    )
+    run_dry_run(registry(FakeProvider()), str(source), out, prompts=load_prompts())
+
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "Proof of [/x] and [bold]" in printed
+    assert f"{directory}/out" in printed.replace(" ", "")
+
+
+def test_dry_run_refuses_a_symlinked_review_before_counting(tmp_path):
+    """Stored findings go to the count endpoint, so a planted link would exfiltrate."""
+    review(tmp_path, sections(*THREE))
+    stored = sorted((tmp_path / "out" / "reviews").glob("*.json"))[0]
+    victim = tmp_path / "victim.json"
+    victim.write_text(stored.read_text(encoding="utf-8"), encoding="utf-8")
+    stored.unlink()
+    stored.symlink_to(victim)
+
+    source = tmp_path / "paper.tex"
+    client = FakeProvider()
+    with pytest.raises(ConfigurationError, match="symbolic link"):
+        run_dry_run(registry(client), str(source), tmp_path / "out", prompts=load_prompts())
+    assert client.count_calls == []
 
 
 def test_reviews_without_a_state_file_are_refused_rather_than_ignored(tmp_path):
