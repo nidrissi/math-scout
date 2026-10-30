@@ -1404,6 +1404,23 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
     return ResumeState(settings=settings, completed=completed)
 
 
+def _output_dir(tex_path: str, output_dir: Path | str | None) -> Path:
+    return Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
+
+
+def _open_resume_state(output_dir: Path, settings: dict, live_keys: set[str]) -> ResumeState:
+    """Validate *output_dir* and load its resume state, forgetting chunks no longer live.
+
+    Writes nothing, so the dry run can predict exactly what a real run would reuse. The
+    caller must include the whole-paper key in *live_keys*, or every resume discards its
+    reviews.
+    """
+    _validate_managed_output_tree(output_dir)
+    state = load_resume_state(output_dir, settings)
+    state.prune(live_keys)
+    return state
+
+
 def _describe_settings_change(old: dict, new: dict) -> str:
     differences = []
     for name in sorted(set(old) | set(new)):
@@ -1529,7 +1546,7 @@ def run_pipeline(
     tex, chunks, global_context = _prepare(tex_path, split)
     cache_key = prompt_cache_key(tex)
 
-    output_dir = Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
+    output_dir = _output_dir(tex_path, output_dir)
     reviews_dir = output_dir / "reviews"
     issues_file = output_dir / "issues.jsonl"
     metadata_file = output_dir / RESPONSE_METADATA_FILE
@@ -1546,11 +1563,8 @@ def run_pipeline(
     paper_stem = chunk_stem(len(chunks), paper_chunk)
 
     settings = run_settings(prompts, max_tokens=max_tokens, effort=effort)
-    _validate_managed_output_tree(output_dir)
-    state = load_resume_state(output_dir, settings)
     keys = [chunk_key(chunk) for chunk in chunks]
-    # The whole-paper key has to be live too, or every resume discards its reviews.
-    state.prune(set(keys) | {paper_key})
+    state = _open_resume_state(output_dir, settings, set(keys) | {paper_key})
 
     output_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(exist_ok=True)
@@ -1770,25 +1784,43 @@ def run_pipeline(
 def run_dry_run(
     providers: ProviderRegistry,
     tex_path: str,
+    output_dir: Path | str | None = None,
     prompts: LoadedPrompts | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     effort: str = DEFAULT_EFFORT,
     split: SplitLevel = SplitLevel.SECTION,
 ) -> None:
-    """Count exact request inputs and optionally estimate cost, without generation."""
+    """Count exact request inputs and optionally estimate cost, without generation.
+
+    Reviews a real run in *output_dir* would reuse are not counted, and their findings
+    fill the known-issues blocks as they would in that run. Nothing is written: the
+    directory is read and validated exactly as `run_pipeline` would, but never changed.
+    """
     prompts = load_prompts() if prompts is None else prompts
 
     print("[yellow]DRY RUN — token counting only, no generation requests will be sent.[/yellow]")
     print(
         "[yellow]Each displayed count is exact for the request shown to the provider. "
-        "The run total remains a lower bound because the known-issues block grows from "
-        "generated findings, which do not exist during a dry run. Cost estimates also "
-        "exclude unpriced models and do not predict provider-specific cache hits.[/yellow]\n"
+        "Cost estimates exclude unpriced models and do not predict provider-specific "
+        "cache hits.[/yellow]\n"
     )
 
     tex, chunks, global_context = _prepare(tex_path, split)
-    empty_known_issues = summarize_known_issues([])
     cache_key = prompt_cache_key(tex)
+
+    output_dir = _output_dir(tex_path, output_dir)
+    reviews_dir = output_dir / "reviews"
+    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
+    paper_key = chunk_key(paper_chunk)
+    keys = [chunk_key(chunk) for chunk in chunks]
+    settings = run_settings(prompts, max_tokens=max_tokens, effort=effort)
+    # Stored findings are sent to the count endpoint, so this validation is what keeps a
+    # crafted review/ tree from sending arbitrary local files to the provider.
+    state = _open_resume_state(output_dir, settings, set(keys) | {paper_key})
+    collected: list[IssueWithReviewer] = []
+    reused = 0
+    pending = 0
+
     token_totals: dict[ModelRef, int] = {}
     call_counts: dict[ModelRef, int] = {}
     request_token_counts: dict[ModelRef, list[int]] = {}
@@ -1801,38 +1833,52 @@ def run_dry_run(
     def count_request(request: GenerationRequest) -> int:
         return providers.for_model(request.model).count_tokens(request)
 
-    def count_reviewer(chunk: Chunk, reviewer: ReviewerConfig) -> None:
-        request = _generation_request(
-            model=reviewer.model,
-            system_prompt=reviewer.prompt_text,
-            global_context=global_context,
-            known_issues=empty_known_issues,
-            to_review=_format_review_target(chunk, reviewer.scope),
-            reasoning=reviewer.thinking,
-            effort=effort,
-            max_tokens=max_tokens,
-            with_schema=True,
-            review_protocol=prompts.review_protocol,
-            prompt_cache_key=cache_key,
-        )
-        n = count_request(request)
-        record(reviewer.model, n)
-        print(f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer.name}[/cyan]: {n:,} input tokens")
+    def count_chunk(key: str, chunk: Chunk, reviewers: dict[str, ReviewerConfig]) -> None:
+        """Count each reviewer `run_pipeline` would call on *chunk*, reusing as it would."""
+        nonlocal reused, pending
+        # Computed once per chunk, at the same point as in `run_pipeline`.
+        known_issues = summarize_known_issues(collected)
+        for reviewer_name, reviewer in reviewers.items():
+            label = f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer_name}[/cyan]"
+            if state.is_done(key, reviewer_name):
+                stored = _load_review(reviews_dir / state.review_file(key, reviewer_name))
+                if stored is not None:
+                    collected.extend(attribute_issue(iss, reviewer_name) for iss in stored.issues)
+                    reused += 1
+                    print(f"{label}: [yellow]reusing stored review[/yellow]")
+                    continue
 
-    for chunk in chunks:
-        for reviewer in prompts.scoped(ReviewerScope.SECTION).values():
-            count_reviewer(chunk, reviewer)
+            request = _generation_request(
+                model=reviewer.model,
+                system_prompt=reviewer.prompt_text,
+                global_context=global_context,
+                known_issues=known_issues,
+                to_review=_format_review_target(chunk, reviewer.scope),
+                reasoning=reviewer.thinking,
+                effort=effort,
+                max_tokens=max_tokens,
+                with_schema=True,
+                review_protocol=prompts.review_protocol,
+                prompt_cache_key=cache_key,
+            )
+            n = count_request(request)
+            record(reviewer.model, n)
+            pending += 1
+            print(f"{label}: {n:,} input tokens")
 
-    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
-    for reviewer in prompts.scoped(ReviewerScope.PAPER).values():
-        count_reviewer(paper_chunk, reviewer)
+    for key, chunk in zip(keys, chunks, strict=True):
+        count_chunk(key, chunk, prompts.scoped(ReviewerScope.SECTION))
+
+    paper_reviewers = prompts.scoped(ReviewerScope.PAPER)
+    if paper_reviewers:
+        count_chunk(paper_key, paper_chunk, paper_reviewers)
 
     final_model = prompts.final_model
     final_request = _generation_request(
         model=final_model,
         system_prompt=prompts.final_referee,
         global_context=global_context,
-        known_issues="[]",
+        known_issues=format_all_issues(collected),
         to_review=f"# FULL PAPER\n```latex\n{tex}\n```",
         reasoning=True,
         effort=effort,
@@ -1843,6 +1889,18 @@ def run_dry_run(
     n = count_request(final_request)
     record(final_model, n)
     print(f"  [blue]Final referee[/blue]: {n:,} input tokens")
+
+    plan = f"\n[bold]{pending} reviewer call(s) to make"
+    if reused:
+        plan += f", {reused} already complete in {output_dir} and reused"
+    print(plan + ", then one final referee call.[/bold]")
+    if pending:
+        print(
+            "[yellow]The run total is a lower bound: the known-issues blocks will also "
+            "carry the findings of the pending calls, which do not exist yet.[/yellow]"
+        )
+    else:
+        print("[yellow]Every review is stored, so the final referee count is exact.[/yellow]")
 
     def pricing_for(model: ModelRef):
         return provider_type(model.provider).pricing(model.model)

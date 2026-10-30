@@ -124,9 +124,11 @@ math-scout paper.tex --dry-run
 ```
 
 This asks each selected provider for the exact input-token count of every dry-run request
-and prints a cost estimate without sending a generation request. The individual counts
-are exact; the run total is still a lower bound because it excludes the accumulated
-"known issues" context that only exists after reviewers start producing findings. Cost
+and prints a cost estimate without sending a generation request. It reads the output
+directory the way a real run would, so reviews a resume would reuse are not counted and
+their stored findings are included in the requests that follow. The individual counts
+are exact; the run total is still a lower bound while any reviewer call is pending,
+because it excludes the findings those calls have yet to produce. Cost
 estimates are optional metadata: a model with no trustworthy price on file still works
 and is shown as `pricing unknown`.
 

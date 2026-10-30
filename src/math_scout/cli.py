@@ -76,7 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Count tokens and estimate input cost without sending generation requests.",
+        help=(
+            "Count tokens and estimate input cost without sending generation requests. "
+            "Reviews already stored in the output directory are counted as reused."
+        ),
     )
     parser.add_argument(
         "-y",
@@ -199,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
             run_dry_run(
                 providers,
                 args.input,
+                args.output,
                 prompts=prompts,
                 max_tokens=args.max_tokens,
                 effort=args.effort,

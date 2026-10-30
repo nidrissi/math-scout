@@ -24,7 +24,7 @@ Outputs land in `<input_dir>/review/` by default (override with `--output`):
 - `review/response_metadata.jsonl` — append-only debugging log of generation attempts, with native provider response metadata, complete usage details, and actual retry effort; not used for resume or findings
 - `review/final_report.md` — final synthesis in markdown
 
-Use `--dry-run` to count tokens and estimate cost without sending generation requests, and `--yes` to skip the confirmation prompt in non-interactive contexts. `--split subsection` cuts the section passes at each `\subsection` instead of each `\section`.
+Use `--dry-run` to count tokens and estimate cost without sending generation requests (it counts only the calls a resume from the output directory would make), and `--yes` to skip the confirmation prompt in non-interactive contexts. `--split subsection` cuts the section passes at each `\subsection` instead of each `\section`.
 
 Exit codes: `0` clean (or declined at the prompt — declining is a choice, not an error), `1` finished with failed reviewer calls, `2` misconfigured (no credentials, unknown or unusable model, nothing to review, no terminal to confirm on without `--yes`).
 
@@ -80,6 +80,7 @@ The final referee (`prompts/final_referee.md`) receives global context + all iss
   and a pre-populated output tree. Stored review names must remain validated direct
   children of `reviews/`, and pipeline-managed directories and files must never follow
   symbolic links; otherwise resume moves or ordinary writes can escape the output tree.
+- **The dry run predicts the resume without touching it.** `run_dry_run` opens state through the same `_open_resume_state` as `run_pipeline`, so it reuses, and refuses, exactly where a real run would. It must never write, rename, or sweep, and it must keep that function's output-tree validation: stored findings are sent to the count endpoint, so a planted symlink would exfiltrate the file it points to.
 - **`reviews/*.json` is the source of truth for issues, not `issues.jsonl`.** `all_issues.json` is rebuilt from the stored reviews each run, so a crash between writing a review and appending to the log costs at most a repeated call. `issues.jsonl` is an append-only log and may hold superseded entries.
 - **Section structure is matched against `mask_non_content(tex)`**, never the raw text, so a commented-out or verbatim-quoted `\section` neither invents a chunk nor truncates its neighbour. The mask preserves character offsets, so matches still index into the original.
 - **`\input` targets are confined to the document's directory** (`_is_within`). Papers come from other people; without this, `\input{/etc/passwd}` would exfiltrate to the API.

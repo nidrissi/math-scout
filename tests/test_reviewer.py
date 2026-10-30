@@ -58,6 +58,7 @@ from math_scout.reviewer import (
     chunk_key,
     chunk_stem,
     extract_global_context,
+    format_all_issues,
     format_coverage_note,
     load_known_issues,
     load_prompts,
@@ -1920,6 +1921,107 @@ def test_dry_run_applies_long_context_pricing_per_request(tmp_path, capsys):
     # Six 300,001-token requests: 2x the $2/M input rate and 1.5x the $12/M output rate.
     assert "Estimated input cost (no cache): $7.20" in out
     assert "Max output cost: $3.46" in out
+
+
+def dry_run(tmp_path, tex: str, **kwargs):
+    """Dry-run *tex* against the output dir `review` writes to, returning the client."""
+    source = tmp_path / "paper.tex"
+    source.write_text(tex, encoding="utf-8")
+    client = FakeProvider()
+    run_dry_run(
+        registry(client),
+        str(source),
+        tmp_path / "out",
+        prompts=load_prompts(**kwargs.pop("models", {})),
+        **kwargs,
+    )
+    return client
+
+
+def known_issues_block(request) -> str:
+    return next(block.text for block in request.blocks if block.role == "user")
+
+
+def output_tree(tmp_path) -> dict[str, int]:
+    return {
+        str(path.relative_to(tmp_path)): path.stat().st_mtime_ns
+        for path in sorted(tmp_path.rglob("*"))
+    }
+
+
+def test_dry_run_counts_only_the_final_referee_when_every_review_is_stored(tmp_path, capsys):
+    _, result = review(tmp_path, sections(*THREE))
+    capsys.readouterr()
+
+    client = dry_run(tmp_path, sections(*THREE))
+
+    (final,) = client.count_calls
+    # The same findings, in the same order, as the real run handed its final referee.
+    assert known_issues_block(final) == f"# DETECTED ISSUES\n{format_all_issues(result.issues)}"
+    out = capsys.readouterr().out
+    assert out.count("reusing stored review") == THREE_CALLS
+    assert "0 reviewer call(s) to make" in out
+    assert "final referee count is exact" in out
+
+
+def test_dry_run_counts_an_edited_section_with_the_stored_findings_before_it(tmp_path):
+    review(tmp_path, sections(*THREE))
+
+    client = dry_run(tmp_path, sections(("Alpha", "aaa"), ("Beta", "edited"), ("Gamma", "ggg")))
+
+    # Beta's three section passes, both whole-paper passes, and the final referee.
+    assert len(client.count_calls) == SECTION_CALLS + PAPER_CALLS + 1
+    beta = client.count_calls[0]
+    assert "SECTION TITLE: Beta" in beta.blocks[-1].text
+    # Alpha's stored findings, one per section reviewer, as a resumed run would send.
+    assert known_issues_block(beta).count("\n- [") == SECTION_CALLS
+
+
+def test_dry_run_counts_a_corrupt_stored_review_as_pending(tmp_path):
+    review(tmp_path, sections(*THREE))
+    stored = sorted((tmp_path / "out" / "reviews").glob("*.json"))[0]
+    stored.write_text("{ not json", encoding="utf-8")
+
+    client = dry_run(tmp_path, sections(*THREE))
+
+    assert len(client.count_calls) == 2
+
+
+def test_dry_run_leaves_an_existing_output_tree_untouched(tmp_path):
+    """An inserted section would make a real run rename and sweep stored reviews."""
+    review(tmp_path, sections(*THREE))
+    before = output_tree(tmp_path / "out")
+
+    dry_run(tmp_path, sections(("Alpha", "aaa"), ("New", "nnn"), ("Beta", "bbb"), ("Gamma", "ggg")))
+
+    assert output_tree(tmp_path / "out") == before
+
+
+def test_dry_run_creates_no_output_directory(tmp_path):
+    dry_run(tmp_path, sections(*THREE))
+    assert not (tmp_path / "out").exists()
+
+
+def test_dry_run_refuses_a_directory_a_real_run_would_refuse(tmp_path):
+    review(tmp_path, sections(*THREE))
+    with pytest.raises(ConfigurationError, match="different settings"):
+        dry_run(tmp_path, sections(*THREE), effort="low")
+
+
+def test_dry_run_refuses_a_symlinked_review_before_counting(tmp_path):
+    """Stored findings go to the count endpoint, so a planted link would exfiltrate."""
+    review(tmp_path, sections(*THREE))
+    stored = sorted((tmp_path / "out" / "reviews").glob("*.json"))[0]
+    victim = tmp_path / "victim.json"
+    victim.write_text(stored.read_text(encoding="utf-8"), encoding="utf-8")
+    stored.unlink()
+    stored.symlink_to(victim)
+
+    source = tmp_path / "paper.tex"
+    client = FakeProvider()
+    with pytest.raises(ConfigurationError, match="symbolic link"):
+        run_dry_run(registry(client), str(source), tmp_path / "out", prompts=load_prompts())
+    assert client.count_calls == []
 
 
 def test_reviews_without_a_state_file_are_refused_rather_than_ignored(tmp_path):

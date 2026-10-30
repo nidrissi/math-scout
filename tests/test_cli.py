@@ -99,6 +99,14 @@ def test_split_reaches_both_the_pipeline_and_the_dry_run(paper, monkeypatch, tmp
     assert seen == {"pipeline": SplitLevel.SUBSECTION, "dry run": SplitLevel.SUBSECTION}
 
 
+def test_output_reaches_the_dry_run(paper, monkeypatch, tmp_path):
+    seen = []
+    monkeypatch.setattr(cli, "run_dry_run", lambda *args, **kwargs: seen.append(args[2]))
+    out = str(tmp_path / "elsewhere")
+    assert cli.main([str(paper), "--dry-run", "--output", out]) == cli.EXIT_OK
+    assert seen == [out]
+
+
 def test_short_yes_flag_works():
     assert cli.build_parser().parse_args(["paper.tex", "-y"]).yes is True
 

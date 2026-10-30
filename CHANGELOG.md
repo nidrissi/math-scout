@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- `--dry-run` reads the output directory (`--output`, or `review/` beside the paper) and
+  counts only the reviewer calls a resume would make. Stored findings go into the
+  known-issues and final-referee blocks as they would in the real run, so a fully
+  reviewed paper is priced exactly. A directory a real run would refuse, for example
+  one made with different settings, is refused by the dry run too.
+
 ## [0.6.0] — 2026-10-29
 
 **This invalidates existing output directories.** The review protocol changed, so a
