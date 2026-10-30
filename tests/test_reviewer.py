@@ -7,6 +7,7 @@ transforms LaTeX text or reads files from a tmp_path fixture.
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -44,6 +45,7 @@ from math_scout.reviewer import (
     ConfigurationError,
     Issue,
     IssueWithReviewer,
+    PipelineResult,
     Review,
     ReviewerScope,
     SeverityLevel,
@@ -1987,16 +1989,43 @@ def test_dry_run_counts_a_corrupt_stored_review_as_pending(tmp_path):
     assert len(client.count_calls) == 2
 
 
-@pytest.mark.parametrize("rename_stage", ["moving", "wanted"])
+def interrupt_rename(out: Path, stored: str, target: str, stage: str) -> Path:
+    """Leave review *stored* where `retarget_reviews` would if interrupted at *stage*:
+    staged, staged and journaled, or moved to *target*. Returns the review's path."""
+    reviews = out / "reviews"
+    staged = reviews / (stored + MOVING_SUFFIX)
+    (reviews / stored).replace(staged)
+    if stage == "staged":
+        return staged
+    state_path = out / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    key, reviewer = next(
+        (key, reviewer)
+        for key, reviewers in state["completed"].items()
+        for reviewer, name in reviewers.items()
+        if name == stored
+    )
+    state["renaming"] = {key: {reviewer: target}}
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    if stage == "journaled":
+        return staged
+    staged.replace(reviews / target)
+    return reviews / target
+
+
+RENAME_STAGES = ["staged", "journaled", "finished"]
+
+
+@pytest.mark.parametrize("rename_stage", RENAME_STAGES)
 @pytest.mark.parametrize("corrupt", [False, True])
 def test_dry_run_predicts_recovery_of_an_interrupted_rename(tmp_path, rename_stage, corrupt):
     review(tmp_path, sections(*THREE))
-    reviews = tmp_path / "out" / "reviews"
-    stored = reviews / "000_Alpha_FormalVerifier.json"
-    recovered = reviews / (
-        stored.name + MOVING_SUFFIX if rename_stage == "moving" else "001_Alpha_FormalVerifier.json"
+    recovered = interrupt_rename(
+        tmp_path / "out",
+        "000_Alpha_FormalVerifier.json",
+        "001_Alpha_FormalVerifier.json",
+        rename_stage,
     )
-    stored.replace(recovered)
     if corrupt:
         recovered.write_text("{ not json", encoding="utf-8")
     # Inserting a section shifts Alpha's filename while preserving its chunk key.
@@ -2022,19 +2051,15 @@ def test_dry_run_predicts_recovery_of_an_interrupted_rename(tmp_path, rename_sta
     assert len(result.issues) == 3 * SECTION_CALLS - int(corrupt)
 
 
-@pytest.mark.parametrize("rename_stage", ["moving", "wanted"])
+@pytest.mark.parametrize("rename_stage", RENAME_STAGES)
 def test_dry_run_recovers_paper_reviews_after_a_split_change(tmp_path, rename_stage):
     tex = sections(("Alpha", "\\subsection{One}\naaa\n\\subsection{Two}\nbbb"), ("Tail", "zzz"))
     review(tmp_path, tex)
-    reviews = tmp_path / "out" / "reviews"
-    stored = reviews / "002_whole_paper_NotationAuditor.json"
-    stored.replace(
-        reviews
-        / (
-            stored.name + MOVING_SUFFIX
-            if rename_stage == "moving"
-            else "003_whole_paper_NotationAuditor.json"
-        )
+    interrupt_rename(
+        tmp_path / "out",
+        "002_whole_paper_NotationAuditor.json",
+        "003_whole_paper_NotationAuditor.json",
+        rename_stage,
     )
     before = output_tree(tmp_path / "out")
 
@@ -2079,6 +2104,149 @@ def test_dry_run_predicts_staged_reviews_swapping_filenames(tmp_path):
     assert len(actual.parse_calls) == PAPER_CALLS
     assert predicted.count_calls == actual.parse_calls + actual.create_calls
     assert len(result.issues) == 3 * SECTION_CALLS
+
+
+def stored_reviews(out: Path) -> dict[tuple[str, str], str]:
+    """Each stored review's content, keyed by chunk and reviewer rather than filename."""
+    state = json.loads((out / "state.json").read_text(encoding="utf-8"))
+    return {
+        (key, reviewer): (out / "reviews" / name).read_text(encoding="utf-8")
+        for key, reviewers in state["completed"].items()
+        for reviewer, name in reviewers.items()
+    }
+
+
+def resume(tmp_path, tex: str) -> tuple[FakeProvider, PipelineResult]:
+    """Resume into `review`'s output dir with no new findings, so every request matches
+    what the dry run counted."""
+    client = FakeProvider()
+    result = run_pipeline(
+        registry(client),
+        str(tmp_path / "paper.tex"),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+    )
+    return client, result
+
+
+# Two Lemmas sections swapping places: three reviewers each, staged and then finished.
+SWAP_RENAMES = 2 * 2 * SECTION_CALLS
+
+
+@pytest.mark.parametrize("crash_at", range(SWAP_RENAMES))
+def test_a_swap_interrupted_at_any_rename_resumes_with_each_review_on_its_own_chunk(
+    tmp_path, monkeypatch, crash_at
+):
+    a, b, tail = ("Lemmas", "aaa"), ("Lemmas", "bbb"), ("Tail", "zzz")
+    review(tmp_path, sections(a, b, tail))
+    out = tmp_path / "out"
+    # Distinct contents, so a review landing on the wrong chunk is visible.
+    for path in (out / "reviews").glob("*.json"):
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        stored["issues"][0]["analysis"] = path.name
+        path.write_text(json.dumps(stored), encoding="utf-8")
+    expected = {
+        entry: content for entry, content in stored_reviews(out).items() if "Lemmas" in content
+    }
+
+    renames = 0
+    real_replace = Path.replace
+
+    def crashing_replace(self, target):
+        nonlocal renames
+        if renames == crash_at:
+            raise KeyboardInterrupt
+        renames += 1
+        return real_replace(self, target)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "replace", crashing_replace)
+        with pytest.raises(KeyboardInterrupt):
+            review(tmp_path, sections(b, a, tail))
+
+    predicted = dry_run(tmp_path, sections(b, a, tail))
+    actual, _ = resume(tmp_path, sections(b, a, tail))
+
+    assert not any("SECTION TITLE: Lemmas" in call.blocks[-1].text for call in actual.parse_calls)
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    after = stored_reviews(out)
+    assert {entry: after[entry] for entry in expected} == expected
+    assert sorted(path.name for path in (out / "reviews").glob("*Lemmas*")) == [
+        f"{index:03d}_Lemmas_{reviewer}.json"
+        for index in (0, 1)
+        for reviewer in sorted(("FormalVerifier", "AdversarialSkeptic", "ExpositionReferee"))
+    ]
+
+
+def test_a_leftover_review_at_the_target_name_is_not_taken_for_a_missing_one(tmp_path):
+    """Both sections' filenames reduce to The_-invariant, so the deleted section's review
+    sits exactly where the surviving section's review is headed."""
+    alpha, beta = ("The $\\alpha$-invariant", "aaa"), ("The $\\beta$-invariant", "bbb")
+    review(tmp_path, sections(alpha, beta, ("Tail", "zzz")))
+    (tmp_path / "out" / "reviews" / "001_The_-invariant_FormalVerifier.json").unlink()
+    tex = sections(beta, ("Tail", "zzz"))
+
+    predicted = dry_run(tmp_path, tex)
+    client, result = resume(tmp_path, tex)
+
+    assert [call.blocks[-1].text.count("SECTION TITLE") for call in client.parse_calls] == [
+        1,
+        0,
+        0,
+    ]
+    assert "SECTION TITLE: The $\\beta$-invariant" in client.parse_calls[0].blocks[-1].text
+    assert predicted.count_calls == client.parse_calls + client.create_calls
+    assert not any(issue.location == alpha[0] for issue in result.issues)
+
+
+def test_an_ambiguous_rename_from_before_the_journal_is_run_again(tmp_path):
+    """Earlier versions moved reviews to their targets without a journal. Interrupted
+    mid-swap, they left a stored name holding another chunk's review beside the staged
+    original, which nothing on disk tells apart from staging debris."""
+    a, b, tail = ("Lemmas", "aaa"), ("Lemmas", "bbb"), ("Tail", "zzz")
+    review(tmp_path, sections(a, b, tail))
+    reviews = tmp_path / "out" / "reviews"
+    for path in reviews.glob("*_Lemmas_*.json"):
+        path.replace(path.with_name(path.name + MOVING_SUFFIX))
+    for path in reviews.glob(f"000_Lemmas_*.json{MOVING_SUFFIX}"):
+        path.replace(reviews / path.name.replace("000_", "001_").removesuffix(MOVING_SUFFIX))
+
+    predicted = dry_run(tmp_path, sections(b, a, tail))
+    client, _ = resume(tmp_path, sections(b, a, tail))
+
+    assert len(client.parse_calls) == 2 * SECTION_CALLS + PAPER_CALLS
+    assert predicted.count_calls == client.parse_calls + client.create_calls
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_a_review_that_is_not_a_regular_file_is_refused(tmp_path, kind):
+    """A FIFO would hang the read of a stored review; a directory would fail a rename
+    halfway through."""
+    review(tmp_path, sections(*THREE))
+    stored = tmp_path / "out" / "reviews" / "000_Alpha_FormalVerifier.json"
+    stored.unlink()
+    if kind == "fifo":
+        os.mkfifo(stored)
+    else:
+        stored.mkdir()
+
+    with pytest.raises(ConfigurationError, match="not a regular file"):
+        dry_run(tmp_path, sections(*THREE))
+    with pytest.raises(ConfigurationError, match="not a regular file"):
+        review(tmp_path, sections(("New", "nnn"), *THREE))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads unreadable directories")
+def test_an_unreadable_output_directory_is_a_configuration_error(tmp_path):
+    review(tmp_path, sections(*THREE))
+    out = tmp_path / "out"
+    out.chmod(0)
+    try:
+        with pytest.raises(ConfigurationError, match="Cannot inspect output directory"):
+            dry_run(tmp_path, sections(*THREE))
+    finally:
+        out.chmod(0o755)
 
 
 def test_dry_run_leaves_an_existing_output_tree_untouched(tmp_path):

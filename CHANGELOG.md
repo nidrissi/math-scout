@@ -15,6 +15,21 @@ All notable changes to this project are documented here. The format is based on
   reviewed paper is priced exactly. A directory a real run would refuse, for example
   one made with different settings, is refused by the dry run too.
 
+### Fixed
+
+- A run interrupted while renaming stored reviews no longer resumes with one chunk's
+  findings filed under another's. Renames are now journaled in `state.json` before any
+  review is moved onto its new name, so recovery reads where each review went instead
+  of guessing. A missing review is run again rather than replaced by whatever file sits
+  at its new name, such as the leftover review of a deleted section with the same
+  filename. An interrupted rename from an earlier version that cannot be told apart
+  safely is also run again.
+- A FIFO, directory, or other non-regular file in `reviews/` or `chunks/` is refused
+  before anything is written or counted. A FIFO used to hang the run and a directory
+  failed it partway through renaming. An output directory that cannot be read is a
+  configuration error (exit code 2), not a traceback.
+- "Renamed N stored review(s)" counts only files actually moved.
+
 ## [0.6.0] — 2026-10-29
 
 **This invalidates existing output directories.** The review protocol changed, so a
