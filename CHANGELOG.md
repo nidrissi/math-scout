@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-30
+
 ### Changed
 
 - `--dry-run` reads the output directory (`--output`, or `review/` beside the paper) and

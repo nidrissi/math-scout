@@ -1,6 +1,6 @@
 [project]
 name = "math-scout"
-version = "0.6.0"
+version = "0.6.1"
 description = "A multi-agent first-pass reader for mathematical papers."
 readme = "README.md"
 requires-python = ">=3.11"
