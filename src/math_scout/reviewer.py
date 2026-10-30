@@ -14,6 +14,7 @@ from textwrap import indent
 
 from pydantic import BaseModel
 from rich import print
+from rich.markup import escape
 
 from .providers import (
     EFFORT_LEVELS,
@@ -560,8 +561,8 @@ def resolve_inputs(
         ) from exc
     if _depth >= MAX_INPUT_DEPTH:
         print(
-            f"[yellow]Warning: \\input nesting deeper than {MAX_INPUT_DEPTH} at {path}; "
-            "not expanding further.[/yellow]"
+            f"[yellow]Warning: \\input nesting deeper than {MAX_INPUT_DEPTH} at "
+            f"{escape(str(path))}; not expanding further.[/yellow]"
         )
         return text
 
@@ -573,20 +574,24 @@ def resolve_inputs(
         target = _resolve_reference(reference, search_dirs)
         if target is None:
             print(
-                f"[yellow]Warning: cannot find {reference!r} referenced from {path}; "
-                "leaving the reference unexpanded.[/yellow]"
+                f"[yellow]Warning: cannot find {escape(repr(reference))} referenced from "
+                f"{escape(str(path))}; leaving the reference unexpanded.[/yellow]"
             )
             return match.group(0)
         if not _is_within(target, root):
             # Papers arrive from other people. Without this, \input{/etc/passwd} would
             # read any file the user can read and ship it to the API and into the report.
             print(
-                f"[yellow]Refusing to inline {reference!r} from {path}: it resolves to "
-                f"{target.resolve()}, outside {root.resolve()}.[/yellow]"
+                f"[yellow]Refusing to inline {escape(repr(reference))} from {escape(str(path))}: "
+                f"it resolves to {escape(str(target.resolve()))}, "
+                f"outside {escape(str(root.resolve()))}.[/yellow]"
             )
             return match.group(0)
         if target.resolve() in seen:
-            print(f"[yellow]Warning: circular \\input of {target} from {path}; skipping.[/yellow]")
+            print(
+                f"[yellow]Warning: circular \\input of {escape(str(target))} from "
+                f"{escape(str(path))}; skipping.[/yellow]"
+            )
             return ""
         return resolve_inputs(target, root=root, _seen=seen, _depth=_depth + 1)
 
@@ -1034,7 +1039,9 @@ def _append_metadata_record(metadata_file: Path | None, record: dict, started: f
         with os.fdopen(fd, "a", encoding="utf-8") as log:
             log.write(line)
     except (OSError, TypeError, ValueError) as exc:
-        print(f"[yellow]Could not append to {metadata_file}: {exc}[/yellow]")
+        print(
+            f"[yellow]Could not append to {escape(str(metadata_file))}: {escape(str(exc))}[/yellow]"
+        )
 
 
 def call_reviewer(
@@ -1087,7 +1094,7 @@ def call_reviewer(
     if response.parsed is None and response.truncated and retry_effort is not None:
         print(
             f"[yellow]  {reviewer.name} exhausted {max_tokens:,} tokens on "
-            f"'{chunk.name}' at --effort {effort}; retrying at {retry_effort}.[/yellow]"
+            f"'{escape(chunk.name)}' at --effort {effort}; retrying at {retry_effort}.[/yellow]"
         )
         _, response = attempt(retry_effort)
 
@@ -1324,6 +1331,14 @@ def _validate_completed_state(
     return completed
 
 
+class IncompatibleOutputError(ConfigurationError):
+    """The output directory holds reviews this run cannot reuse.
+
+    A real run refuses it rather than mix incomparable findings into one report. A dry
+    run only has to price the calls, so it can count them as if starting fresh.
+    """
+
+
 def _validate_managed_output_tree(output_dir: Path) -> None:
     """Refuse symlinks in paths the pipeline reads, overwrites, moves, or deletes.
 
@@ -1393,7 +1408,7 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
 
     if not state_path.exists():
         if reviews_dir.is_dir() and any(reviews_dir.glob("*.json")):
-            raise ConfigurationError(
+            raise IncompatibleOutputError(
                 f"{reviews_dir} holds reviews but {state_path} is missing, so there is no "
                 "record of what produced them. Delete the output directory or pass a "
                 "different --output."
@@ -1409,14 +1424,14 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
         raise ConfigurationError(f"Invalid resume state object in {state_path}.")
 
     if stored.get("version") != STATE_VERSION:
-        raise ConfigurationError(
+        raise IncompatibleOutputError(
             f"{state_path} was written by a different version of math-scout. Delete the "
             "output directory or pass a different --output."
         )
 
     if stored.get("settings") != settings:
         changed = _describe_settings_change(stored.get("settings") or {}, settings)
-        raise ConfigurationError(
+        raise IncompatibleOutputError(
             f"{output_dir} holds a run made with different settings ({changed}). Reusing "
             "those reviews would report findings that the current settings did not "
             "produce. Delete the output directory or pass a different --output."
@@ -1430,6 +1445,64 @@ def load_resume_state(output_dir: Path, settings: dict) -> ResumeState:
 
 def _output_dir(tex_path: str, output_dir: Path | str | None) -> Path:
     return Path(tex_path).parent / "review" if output_dir is None else Path(output_dir)
+
+
+@dataclass(frozen=True)
+class ResumeLayout:
+    """Which chunks a run reviews and under which names, shared by the real and dry runs."""
+
+    output_dir: Path
+    settings: dict
+    keys: list[str]
+    stems: list[str]
+    paper_chunk: Chunk
+    paper_key: str
+    paper_stem: str
+
+    @property
+    def reviews_dir(self) -> Path:
+        return self.output_dir / "reviews"
+
+    @property
+    def live_keys(self) -> set[str]:
+        # Without the whole-paper key, every resume would discard its reviews.
+        return set(self.keys) | {self.paper_key}
+
+    @property
+    def stem_by_key(self) -> dict[str, str]:
+        """The filename stem each chunk's reviews are kept under.
+
+        Identical chunks share a key, and the real run reuses the first one's reviews for
+        the rest, so they stay under the first one's stem.
+        """
+        stems: dict[str, str] = {}
+        for key, stem in zip(self.keys, self.stems, strict=True):
+            stems.setdefault(key, stem)
+        stems.setdefault(self.paper_key, self.paper_stem)
+        return stems
+
+
+def _resume_layout(
+    tex: str,
+    chunks: list[Chunk],
+    output_dir: Path,
+    prompts: LoadedPrompts,
+    max_tokens: int,
+    effort: str,
+) -> ResumeLayout:
+    # Paper-scoped reviewers are handed the whole source as one more chunk, so they get
+    # the same identity, storage and resume behaviour as a section without a second
+    # bookkeeping path. It goes last, so they see every section finding.
+    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
+    return ResumeLayout(
+        output_dir=output_dir,
+        settings=run_settings(prompts, max_tokens=max_tokens, effort=effort),
+        keys=[chunk_key(chunk) for chunk in chunks],
+        stems=[chunk_stem(index, chunk) for index, chunk in enumerate(chunks)],
+        paper_chunk=paper_chunk,
+        paper_key=chunk_key(paper_chunk),
+        paper_stem=chunk_stem(len(chunks), paper_chunk),
+    )
 
 
 def _open_resume_state(output_dir: Path, settings: dict, live_keys: set[str]) -> ResumeState:
@@ -1613,7 +1686,10 @@ def run_pipeline(
     cache_key = prompt_cache_key(tex)
 
     output_dir = _output_dir(tex_path, output_dir)
-    reviews_dir = output_dir / "reviews"
+    layout = _resume_layout(tex, chunks, output_dir, prompts, max_tokens, effort)
+    keys, stems = layout.keys, layout.stems
+    paper_chunk, paper_key, paper_stem = layout.paper_chunk, layout.paper_key, layout.paper_stem
+    reviews_dir = layout.reviews_dir
     issues_file = output_dir / "issues.jsonl"
     metadata_file = output_dir / RESPONSE_METADATA_FILE
     chunks_dir = output_dir / "chunks"
@@ -1621,16 +1697,7 @@ def run_pipeline(
     section_reviewers = prompts.scoped(ReviewerScope.SECTION)
     paper_reviewers = prompts.scoped(ReviewerScope.PAPER)
 
-    # Paper-scoped reviewers are handed the whole source as one more chunk, so they get
-    # the same identity, storage and resume behaviour as a section without a second
-    # bookkeeping path. It goes last, so they see every section finding.
-    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
-    paper_key = chunk_key(paper_chunk)
-    paper_stem = chunk_stem(len(chunks), paper_chunk)
-
-    settings = run_settings(prompts, max_tokens=max_tokens, effort=effort)
-    keys = [chunk_key(chunk) for chunk in chunks]
-    state = _open_resume_state(output_dir, settings, set(keys) | {paper_key})
+    state = _open_resume_state(output_dir, layout.settings, layout.live_keys)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     reviews_dir.mkdir(exist_ok=True)
@@ -1638,7 +1705,6 @@ def run_pipeline(
 
     result = PipelineResult(output_dir=output_dir)
 
-    stems = [chunk_stem(index, chunk) for index, chunk in enumerate(chunks)]
     written = list(zip(stems, chunks, strict=True))
     if paper_reviewers:
         written.append((paper_stem, paper_chunk))
@@ -1646,21 +1712,22 @@ def run_pipeline(
         chunk_path = chunks_dir / f"{stem}.tex"
         chunk_path.write_text(chunk.content, encoding="utf-8")
         print(
-            f"[green]Extracted chunk:[/green] {chunk.name} "
-            f"(written to {chunk_path}, {len(chunk.content)} chars)"
+            f"[green]Extracted chunk:[/green] {escape(chunk.name)} "
+            f"(written to {escape(str(chunk_path))}, {len(chunk.content)} chars)"
         )
 
     preview = global_context[:500]
     ellipsis = "…" if len(global_context) > 500 else ""
     print(
         f"[green]Extracted global context ({len(global_context)} chars):[/green]\n"
-        f"[gray]{preview}{ellipsis}[/gray]"
+        f"[gray]{escape(preview)}{ellipsis}[/gray]"
     )
 
     scheduled = [(key, name) for key in keys for name in section_reviewers]
     scheduled += [(paper_key, name) for name in paper_reviewers]
     done = sum(state.is_done(key, name) for key, name in scheduled)
-    pending = len(scheduled) - done
+    # A chunk identical to an earlier one reuses the review just made for it.
+    pending = len({pair for pair in scheduled if not state.is_done(*pair)})
     plan = f"[bold]{pending} reviewer call(s) to make"
     if done:
         plan += f", {done} already complete and reused"
@@ -1674,8 +1741,7 @@ def run_pipeline(
     # Only now, with the run committed. Writing output before the prompt is one thing;
     # deleting a previous run's on the way to a question the user may answer "no" is
     # another, and a declined run should leave the directory exactly as it found it.
-    stem_by_key = dict(zip(keys, stems, strict=True)) | {paper_key: paper_stem}
-    moved = retarget_reviews(state, stem_by_key, reviews_dir, output_dir / STATE_FILE)
+    moved = retarget_reviews(state, layout.stem_by_key, reviews_dir, output_dir / STATE_FILE)
     if moved:
         print(
             f"[yellow]Renamed {moved} stored review(s) to match the current section order.[/yellow]"
@@ -1685,7 +1751,9 @@ def run_pipeline(
     removed = sweep(reviews_dir, live_reviews, ("*.json", f"*{MOVING_SUFFIX}"))
     removed += sweep(chunks_dir, {f"{stem}.tex" for stem, _ in written}, ("*.tex",))
     if removed:
-        print(f"[yellow]Removed {len(removed)} stale file(s): {', '.join(removed)}[/yellow]")
+        print(
+            f"[yellow]Removed {len(removed)} stale file(s): {escape(', '.join(removed))}[/yellow]"
+        )
 
     print("[bold blue]Starting multi-reviewer analysis...[/bold blue]")
 
@@ -1701,7 +1769,7 @@ def run_pipeline(
         Sets ``result.fatal_error`` and returns early when the API says every remaining
         call would fail the same way.
         """
-        print(f"[bold blue]Reviewing:[/bold blue] {chunk.name}")
+        print(f"[bold blue]Reviewing:[/bold blue] {escape(chunk.name)}")
         known_issues = summarize_known_issues(all_issues)
 
         for reviewer_name, reviewer in reviewers.items():
@@ -1735,14 +1803,20 @@ def run_pipeline(
             except FATAL_PROVIDER_ERRORS as exc:
                 # Credentials or the model itself are wrong, so every remaining call
                 # would fail identically. Stop rather than burn through the whole paper.
-                print(f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]")
+                print(
+                    f"  [red]ERROR: {reviewer_name} on '{escape(chunk.name)}' failed: "
+                    f"{escape(str(exc))}[/red]"
+                )
                 result.fatal_error = (
                     f"Aborting: {type(exc).__name__} from the API means every remaining "
                     f"call would fail the same way. {exc}"
                 )
                 return
             except Exception as exc:
-                print(f"  [red]ERROR: {reviewer_name} on '{chunk.name}' failed: {exc}[/red]")
+                print(
+                    f"  [red]ERROR: {reviewer_name} on '{escape(chunk.name)}' failed: "
+                    f"{escape(str(exc))}[/red]"
+                )
                 result.failures.append(
                     ReviewerFailure(section=chunk.name, reviewer=reviewer_name, error=str(exc))
                 )
@@ -1782,9 +1856,9 @@ def run_pipeline(
     )
 
     if result.fatal_error is not None:
-        print(f"\n[red]{result.fatal_error}[/red]")
+        print(f"\n[red]{escape(result.fatal_error)}[/red]")
         print(
-            f"[yellow]Issues collected so far are preserved in {all_issues_path}. "
+            f"[yellow]Issues collected so far are preserved in {escape(str(all_issues_path))}. "
             "Fix the problem and re-run the same command to resume.[/yellow]"
         )
         return result
@@ -1796,7 +1870,8 @@ def run_pipeline(
         )
         for failure in result.failures:
             print(
-                f"  [yellow]- {failure.reviewer} on '{failure.section}': {failure.error}[/yellow]"
+                f"  [yellow]- {failure.reviewer} on '{escape(failure.section)}': "
+                f"{escape(failure.error)}[/yellow]"
             )
 
     print("[bold blue]Running final referee synthesis...[/bold blue]")
@@ -1819,16 +1894,16 @@ def run_pipeline(
             f"Aborting: {type(exc).__name__} from the API means every remaining call "
             f"would fail the same way. {exc}"
         )
-        print(f"[red]ERROR: final referee synthesis failed: {exc}[/red]")
+        print(f"[red]ERROR: final referee synthesis failed: {escape(str(exc))}[/red]")
         print(
-            f"[yellow]Collected issues are preserved in {all_issues_path}; "
+            f"[yellow]Collected issues are preserved in {escape(str(all_issues_path))}; "
             "fix the problem and re-run the same command to resume.[/yellow]"
         )
         return result
     except Exception as exc:
-        print(f"[red]ERROR: final referee synthesis failed: {exc}[/red]")
+        print(f"[red]ERROR: final referee synthesis failed: {escape(str(exc))}[/red]")
         print(
-            f"[yellow]Collected issues are preserved in {all_issues_path}; "
+            f"[yellow]Collected issues are preserved in {escape(str(all_issues_path))}; "
             "re-run the same command to retry the synthesis.[/yellow]"
         )
         result.failures.append(
@@ -1874,30 +1949,33 @@ def run_dry_run(
     cache_key = prompt_cache_key(tex)
 
     output_dir = _output_dir(tex_path, output_dir)
-    reviews_dir = output_dir / "reviews"
-    paper_chunk = Chunk(name=WHOLE_PAPER_NAME, content=tex)
-    paper_key = chunk_key(paper_chunk)
-    keys = [chunk_key(chunk) for chunk in chunks]
-    settings = run_settings(prompts, max_tokens=max_tokens, effort=effort)
-    # Stored findings are sent to the count endpoint, so this validation is what keeps a
-    # crafted review/ tree from sending arbitrary local files to the provider.
-    state = _open_resume_state(output_dir, settings, set(keys) | {paper_key})
-    stems = {
-        key: chunk_stem(index, chunk)
-        for index, (key, chunk) in enumerate(zip(keys, chunks, strict=True))
-    }
-    stems[paper_key] = chunk_stem(len(chunks), paper_chunk)
+    layout = _resume_layout(tex, chunks, output_dir, prompts, max_tokens, effort)
+    reviews_dir = layout.reviews_dir
+    try:
+        # Stored findings are sent to the count endpoint, so this validation is what
+        # keeps a crafted review/ tree from sending arbitrary local files to the provider.
+        state = _open_resume_state(output_dir, layout.settings, layout.live_keys)
+    except IncompatibleOutputError as exc:
+        # Pricing different settings is a reason to dry-run, not a mistake. Nothing is
+        # read from the directory, so counting from scratch exposes none of it.
+        print(
+            f"[yellow]A real run would stop here: {escape(str(exc))}\n"
+            "Its stored reviews are ignored, so every call is counted.[/yellow]\n"
+        )
+        state = ResumeState(settings=layout.settings)
     # Where each review a real run would move is now, so it is read without moving it.
     sources: dict[tuple[str, str], Path] = {}
-    for (key, reviewer), located in _plan_review_retargets(state, stems, reviews_dir).items():
+    plan = _plan_review_retargets(state, layout.stem_by_key, reviews_dir)
+    for (key, reviewer), located in plan.items():
         if located is None:
             state.forget(key, reviewer)
         else:
             sources[key, reviewer], wanted = located
             state.mark(key, reviewer, wanted)
     collected: list[IssueWithReviewer] = []
+    # A chunk identical to an earlier one reuses the review the real run makes for it.
+    counted: set[tuple[str, str]] = set()
     reused = 0
-    pending = 0
 
     token_totals: dict[ModelRef, int] = {}
     call_counts: dict[ModelRef, int] = {}
@@ -1913,11 +1991,11 @@ def run_dry_run(
 
     def count_chunk(key: str, chunk: Chunk, reviewers: dict[str, ReviewerConfig]) -> None:
         """Count each reviewer `run_pipeline` would call on *chunk*, reusing as it would."""
-        nonlocal reused, pending
+        nonlocal reused
         # Computed once per chunk, at the same point as in `run_pipeline`.
         known_issues = summarize_known_issues(collected)
         for reviewer_name, reviewer in reviewers.items():
-            label = f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer_name}[/cyan]"
+            label = f"  [blue]{escape(chunk.name)}[/blue] / [cyan]{reviewer_name}[/cyan]"
             if state.is_done(key, reviewer_name):
                 source = sources.get(
                     (key, reviewer_name), reviews_dir / state.review_file(key, reviewer_name)
@@ -1928,6 +2006,9 @@ def run_dry_run(
                     reused += 1
                     print(f"{label}: [yellow]reusing stored review[/yellow]")
                     continue
+            if (key, reviewer_name) in counted:
+                print(f"{label}: [yellow]same text as an earlier chunk, counted there[/yellow]")
+                continue
 
             request = _generation_request(
                 model=reviewer.model,
@@ -1944,15 +2025,15 @@ def run_dry_run(
             )
             n = count_request(request)
             record(reviewer.model, n)
-            pending += 1
+            counted.add((key, reviewer_name))
             print(f"{label}: {n:,} input tokens")
 
-    for key, chunk in zip(keys, chunks, strict=True):
+    for key, chunk in zip(layout.keys, chunks, strict=True):
         count_chunk(key, chunk, prompts.scoped(ReviewerScope.SECTION))
 
     paper_reviewers = prompts.scoped(ReviewerScope.PAPER)
     if paper_reviewers:
-        count_chunk(paper_key, paper_chunk, paper_reviewers)
+        count_chunk(layout.paper_key, layout.paper_chunk, paper_reviewers)
 
     final_model = prompts.final_model
     final_request = _generation_request(
@@ -1971,9 +2052,10 @@ def run_dry_run(
     record(final_model, n)
     print(f"  [blue]Final referee[/blue]: {n:,} input tokens")
 
+    pending = len(counted)
     plan = f"\n[bold]{pending} reviewer call(s) to make"
     if reused:
-        plan += f", {reused} already complete in {output_dir} and reused"
+        plan += f", {reused} already complete in {escape(str(output_dir))} and reused"
     print(plan + ", then one final referee call.[/bold]")
     if pending:
         print(

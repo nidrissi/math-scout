@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from rich import print
+from rich.markup import escape
 
 from . import __version__
 from .providers import ProviderRegistry
@@ -178,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         validate_settings(prompts, max_tokens=args.max_tokens, effort=args.effort)
     except ConfigurationError as exc:
-        print(f"[red]{exc}[/red]")
+        print(f"[red]{escape(str(exc))}[/red]")
         return EXIT_CONFIG
 
     models = [r.model for r in prompts.reviewers.values()]
@@ -186,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         providers = ProviderRegistry.from_models(models)
     except ConfigurationError as exc:
-        print(f"[red]{exc}[/red]")
+        print(f"[red]{escape(str(exc))}[/red]")
         return EXIT_CONFIG
 
     try:
@@ -194,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         # before the run writes anything or asks the user to approve spending.
         check_access(providers, models)
     except ConfigurationError as exc:
-        print(f"[red]{exc}[/red]")
+        print(f"[red]{escape(str(exc))}[/red]")
         return EXIT_CONFIG
 
     try:
@@ -221,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             split=args.split,
         )
     except ConfigurationError as exc:
-        print(f"[red]{exc}[/red]")
+        print(f"[red]{escape(str(exc))}[/red]")
         return EXIT_CONFIG
     except KeyboardInterrupt:
         print("\n[yellow]Interrupted. Re-run the same command to resume.[/yellow]")

@@ -12,8 +12,10 @@ All notable changes to this project are documented here. The format is based on
 - `--dry-run` reads the output directory (`--output`, or `review/` beside the paper) and
   counts only the reviewer calls a resume would make. Stored findings go into the
   known-issues and final-referee blocks as they would in the real run, so a fully
-  reviewed paper is priced exactly. A directory a real run would refuse, for example
-  one made with different settings, is refused by the dry run too.
+  reviewed paper is priced exactly. A directory a real run could not reuse, for
+  example one made with different settings, is priced from scratch with a note that
+  the real run would stop there, so a dry run can price other settings without
+  touching the stored reviews.
 
 ### Fixed
 
@@ -29,6 +31,12 @@ All notable changes to this project are documented here. The format is based on
   failed it partway through renaming. An output directory that cannot be read is a
   configuration error (exit code 2), not a traceback.
 - "Renamed N stored review(s)" counts only files actually moved.
+- Chunks with identical title and text are reviewed once, as before, and are now also
+  counted once, both in the dry run and in the real run's plan line. Their reviews stay
+  under the first chunk's filename instead of moving to the last one's on resume.
+- Paths, section titles, LaTeX and error messages containing square brackets are
+  printed as text. Rich read them as markup: `[draft]` vanished from output, and a
+  `[/x]` raised an error, in the dry run after every count had been made.
 
 ## [0.6.0] — 2026-10-29
 

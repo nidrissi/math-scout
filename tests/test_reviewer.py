@@ -2264,10 +2264,107 @@ def test_dry_run_creates_no_output_directory(tmp_path):
     assert not (tmp_path / "out").exists()
 
 
-def test_dry_run_refuses_a_directory_a_real_run_would_refuse(tmp_path):
+def _change_effort(out: Path) -> dict:
+    return {"effort": "low"}
+
+
+def _change_version(out: Path) -> dict:
+    state = json.loads((out / "state.json").read_text(encoding="utf-8"))
+    state["version"] = -1
+    (out / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return {}
+
+
+def _drop_state(out: Path) -> dict:
+    (out / "state.json").unlink()
+    return {}
+
+
+@pytest.mark.parametrize(
+    ("make_incompatible", "reason"),
+    [
+        (_change_effort, "different settings"),
+        (_change_version, "different version"),
+        (_drop_state, "no record of what produced them"),
+    ],
+)
+def test_dry_run_prices_from_scratch_where_a_real_run_would_refuse(
+    tmp_path, capsys, make_incompatible, reason
+):
+    """Asking what other settings would cost is a price check, not a mistake: it must
+    neither be refused nor send the stored findings the real run could not reuse."""
     review(tmp_path, sections(*THREE))
-    with pytest.raises(ConfigurationError, match="different settings"):
+    kwargs = make_incompatible(tmp_path / "out")
+    before = output_tree(tmp_path / "out")
+    capsys.readouterr()
+
+    client = dry_run(tmp_path, sections(*THREE), **kwargs)
+
+    assert output_tree(tmp_path / "out") == before
+    assert len(client.count_calls) == THREE_CALLS + 1
+    assert all(known_issues_block(call).count("\n- [") == 0 for call in client.count_calls)
+    out = capsys.readouterr().out
+    assert "A real run would stop here" in out
+    assert reason in " ".join(out.split())
+    with pytest.raises(ConfigurationError, match=reason):
+        review(tmp_path, sections(*THREE), **kwargs)
+
+
+def test_dry_run_with_other_settings_still_refuses_a_symlinked_review(tmp_path):
+    review(tmp_path, sections(*THREE))
+    stored = sorted((tmp_path / "out" / "reviews").glob("*.json"))[0]
+    stored.unlink()
+    stored.symlink_to(tmp_path / "paper.tex")
+
+    with pytest.raises(ConfigurationError, match="symbolic link"):
         dry_run(tmp_path, sections(*THREE), effort="low")
+
+
+def test_identical_chunks_share_one_review_and_the_dry_run_counts_it_once(tmp_path, capsys):
+    """Chunks with the same title and text have the same key. The real run reviews the
+    first and reuses that review for the rest, so counting both overstates the cost."""
+    tex = sections(("Proof", "same"), ("Proof", "same"), ("Tail", "zzz"))
+    (tmp_path / "paper.tex").write_text(tex, encoding="utf-8")
+
+    predicted = dry_run(tmp_path, tex)
+    dry_out = capsys.readouterr().out
+    actual, _ = resume(tmp_path, tex)
+    real_out = capsys.readouterr().out
+
+    calls = 2 * SECTION_CALLS + PAPER_CALLS
+    assert len(actual.parse_calls) == calls
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    assert f"{calls} reviewer call(s) to make" in dry_out
+    assert f"{calls} reviewer call(s) to make" in real_out
+
+    # Kept under the first occurrence's name, so a resume has nothing to rename.
+    again, _ = resume(tmp_path, tex)
+    assert again.parse_calls == []
+    assert "Renamed" not in capsys.readouterr().out
+    assert sorted(p.name for p in (tmp_path / "out" / "reviews").glob("*Proof*")) == [
+        f"000_Proof_{reviewer}.json"
+        for reviewer in sorted(("FormalVerifier", "AdversarialSkeptic", "ExpositionReferee"))
+    ]
+
+
+@pytest.mark.parametrize("directory", ["[draft]", "[/x]"])
+def test_brackets_in_paths_and_titles_print_as_text(tmp_path, capsys, directory):
+    """Rich reads [...] as markup: an opening tag vanished, and a stray closing tag
+    raised MarkupError after every count had been paid for."""
+    tex = sections(("Proof of [/x] and [bold]", "aaa"), ("Tail", "zzz"))
+    source = tmp_path / "paper.tex"
+    source.write_text(tex, encoding="utf-8")
+    out = tmp_path / directory / "out"
+
+    run_dry_run(registry(FakeProvider()), str(source), out, prompts=load_prompts())
+    run_pipeline(
+        registry(FakeProvider()), str(source), out, prompts=load_prompts(), assume_yes=True
+    )
+    run_dry_run(registry(FakeProvider()), str(source), out, prompts=load_prompts())
+
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "Proof of [/x] and [bold]" in printed
+    assert f"{directory}/out" in printed.replace(" ", "")
 
 
 def test_dry_run_refuses_a_symlinked_review_before_counting(tmp_path):
