@@ -1442,20 +1442,17 @@ def _load_review(path: Path) -> Review | None:
         return None
 
 
-def retarget_reviews(state: ResumeState, stems: dict[str, str], reviews_dir: Path) -> int:
-    """Move stored reviews to the filenames this run's chunk positions imply.
+def _plan_review_retargets(
+    state: ResumeState, stems: dict[str, str], reviews_dir: Path
+) -> tuple[list[tuple[Path, Path]], dict[tuple[str, str], str]]:
+    """Plan two-phase renames and state updates without changing files or *state*.
 
-    A reused review keeps whatever name it was written under, and the index prefix in
-    that name encodes the chunk's position at the time. Insert a section and every later
-    chunk's position shifts while its stored review does not, so the directory stops
-    sorting in document order and a reader cannot tell which file is current.
-
-    Renaming is safe to interrupt: the move is atomic, and a crash before *state* is
-    saved leaves it naming a file that is gone, which `_load_review` reports as not done
-    and the run repeats. That costs one call and loses nothing, the same trade the rest
-    of the resume bookkeeping makes.
+    A crash can leave a review at its stored name, its staging name, or its target
+    name. Both the real run and the dry run must recover those cases the same way.
     """
-    planned: list[tuple[str, str, str, str]] = []
+    stage: list[tuple[Path, Path]] = []
+    finish: list[tuple[Path, Path]] = []
+    updates: dict[tuple[str, str], str] = {}
     for key, reviewers in state.completed.items():
         if key not in stems:
             continue
@@ -1476,27 +1473,37 @@ def retarget_reviews(state: ResumeState, stems: dict[str, str], reviews_dir: Pat
                     )
 
             if stored_path.is_file() or moving_path.is_file():
-                planned.append((key, reviewer, stored, wanted))
+                if stored_path.is_file():
+                    stage.append((stored_path, moving_path))
+                finish.append((moving_path, wanted_path))
+                updates[key, reviewer] = wanted
             elif wanted_path.is_file():
                 # Rename finished previously but state.json was not saved.
-                state.completed[key][reviewer] = wanted
+                updates[key, reviewer] = wanted
 
-    if not planned:
-        return 0
+    # One rename's target can be another's source, so stage every source first.
+    return stage + finish, updates
 
-    # Two phases. One rename's target can be another's source, so avoid clobbering.
-    for _, _, stored, _ in planned:
-        stored_path = reviews_dir / stored
-        if stored_path.is_file():
-            stored_path.replace(reviews_dir / (stored + MOVING_SUFFIX))
 
-    for key, reviewer, stored, wanted in planned:
-        moving_path = reviews_dir / (stored + MOVING_SUFFIX)
-        if moving_path.is_file():
-            moving_path.replace(reviews_dir / wanted)
-        state.completed[key][reviewer] = wanted
+def retarget_reviews(state: ResumeState, stems: dict[str, str], reviews_dir: Path) -> int:
+    """Move stored reviews to the filenames this run's chunk positions imply.
 
-    return len(planned)
+    A reused review keeps whatever name it was written under, and the index prefix in
+    that name encodes the chunk's position at the time. Insert a section and every later
+    chunk's position shifts while its stored review does not, so the directory stops
+    sorting in document order and a reader cannot tell which file is current.
+
+    Recover interrupted renames from either the staging or target name before saving
+    the updated state. Return the number of retargeted state entries, including those
+    whose rename finished before the previous run was interrupted.
+    """
+    moves, updates = _plan_review_retargets(state, stems, reviews_dir)
+    for source, target in moves:
+        if source.is_file():
+            source.replace(target)
+    for (key, reviewer), wanted in updates.items():
+        state.mark(key, reviewer, wanted)
+    return len(updates)
 
 
 def sweep(directory: Path, live: set[str], patterns: tuple[str, ...]) -> list[str]:
@@ -1817,6 +1824,22 @@ def run_dry_run(
     # Stored findings are sent to the count endpoint, so this validation is what keeps a
     # crafted review/ tree from sending arbitrary local files to the provider.
     state = _open_resume_state(output_dir, settings, set(keys) | {paper_key})
+    stems = {
+        key: chunk_stem(index, chunk)
+        for index, (key, chunk) in enumerate(zip(keys, chunks, strict=True))
+    }
+    stems[paper_key] = chunk_stem(len(chunks), paper_chunk)
+    moves, updates = _plan_review_retargets(state, stems, reviews_dir)
+    # Simulate the same two-phase moves: each final path points to the file that
+    # currently holds its contents, or None if the move would remove that path.
+    sources: dict[Path, Path | None] = {}
+    for source, target in moves:
+        original = sources.get(source, source)
+        if original is not None and original.is_file():
+            sources[target] = original
+            sources[source] = None
+    for (key, reviewer), wanted in updates.items():
+        state.mark(key, reviewer, wanted)
     collected: list[IssueWithReviewer] = []
     reused = 0
     pending = 0
@@ -1841,7 +1864,9 @@ def run_dry_run(
         for reviewer_name, reviewer in reviewers.items():
             label = f"  [blue]{chunk.name}[/blue] / [cyan]{reviewer_name}[/cyan]"
             if state.is_done(key, reviewer_name):
-                stored = _load_review(reviews_dir / state.review_file(key, reviewer_name))
+                stored_path = reviews_dir / state.review_file(key, reviewer_name)
+                source_path = sources.get(stored_path, stored_path)
+                stored = _load_review(source_path) if source_path is not None else None
                 if stored is not None:
                     collected.extend(attribute_issue(iss, reviewer_name) for iss in stored.issues)
                     reused += 1

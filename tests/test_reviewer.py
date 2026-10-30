@@ -1987,6 +1987,100 @@ def test_dry_run_counts_a_corrupt_stored_review_as_pending(tmp_path):
     assert len(client.count_calls) == 2
 
 
+@pytest.mark.parametrize("rename_stage", ["moving", "wanted"])
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_dry_run_predicts_recovery_of_an_interrupted_rename(tmp_path, rename_stage, corrupt):
+    review(tmp_path, sections(*THREE))
+    reviews = tmp_path / "out" / "reviews"
+    stored = reviews / "000_Alpha_FormalVerifier.json"
+    recovered = reviews / (
+        stored.name + MOVING_SUFFIX if rename_stage == "moving" else "001_Alpha_FormalVerifier.json"
+    )
+    stored.replace(recovered)
+    if corrupt:
+        recovered.write_text("{ not json", encoding="utf-8")
+    # Inserting a section shifts Alpha's filename while preserving its chunk key.
+    tex = sections(("New", "nnn"), *THREE)
+    before = output_tree(tmp_path / "out")
+
+    predicted = dry_run(tmp_path, tex)
+
+    assert output_tree(tmp_path / "out") == before
+    # Empty new findings let us compare every request exactly: dry-run already knows
+    # all the findings this resume will use, including the recovered review's issue.
+    actual = FakeProvider()
+    result = run_pipeline(
+        registry(actual),
+        str(tmp_path / "paper.tex"),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+    )
+
+    assert len(actual.parse_calls) == SECTION_CALLS + PAPER_CALLS + int(corrupt)
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    assert len(result.issues) == 3 * SECTION_CALLS - int(corrupt)
+
+
+@pytest.mark.parametrize("rename_stage", ["moving", "wanted"])
+def test_dry_run_recovers_paper_reviews_after_a_split_change(tmp_path, rename_stage):
+    tex = sections(("Alpha", "\\subsection{One}\naaa\n\\subsection{Two}\nbbb"), ("Tail", "zzz"))
+    review(tmp_path, tex)
+    reviews = tmp_path / "out" / "reviews"
+    stored = reviews / "002_whole_paper_NotationAuditor.json"
+    stored.replace(
+        reviews
+        / (
+            stored.name + MOVING_SUFFIX
+            if rename_stage == "moving"
+            else "003_whole_paper_NotationAuditor.json"
+        )
+    )
+    before = output_tree(tmp_path / "out")
+
+    predicted = dry_run(tmp_path, tex, split=SUB)
+
+    assert output_tree(tmp_path / "out") == before
+    actual = FakeProvider()
+    result = run_pipeline(
+        registry(actual),
+        str(tmp_path / "paper.tex"),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+        split=SUB,
+    )
+
+    assert len(actual.parse_calls) == 2 * SECTION_CALLS
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    assert len(result.issues) == SECTION_CALLS + PAPER_CALLS
+
+
+def test_dry_run_predicts_staged_reviews_swapping_filenames(tmp_path):
+    a, b, tail = ("Lemmas", "aaa"), ("Lemmas", "bbb"), ("Tail", "zzz")
+    review(tmp_path, sections(a, b, tail))
+    reviews = tmp_path / "out" / "reviews"
+    for path in reviews.glob("*_Lemmas_*.json"):
+        path.replace(path.with_name(path.name + MOVING_SUFFIX))
+    before = output_tree(tmp_path / "out")
+
+    predicted = dry_run(tmp_path, sections(b, a, tail))
+
+    assert output_tree(tmp_path / "out") == before
+    actual = FakeProvider()
+    result = run_pipeline(
+        registry(actual),
+        str(tmp_path / "paper.tex"),
+        tmp_path / "out",
+        prompts=load_prompts(),
+        assume_yes=True,
+    )
+
+    assert len(actual.parse_calls) == PAPER_CALLS
+    assert predicted.count_calls == actual.parse_calls + actual.create_calls
+    assert len(result.issues) == 3 * SECTION_CALLS
+
+
 def test_dry_run_leaves_an_existing_output_tree_untouched(tmp_path):
     """An inserted section would make a real run rename and sweep stored reviews."""
     review(tmp_path, sections(*THREE))
